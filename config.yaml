@@ -1,4 +1,4 @@
-system:
+﻿system:
   dry_run: false
   log_level: INFO
   cooldown_seconds: 5.0
@@ -94,6 +94,8 @@ auto_auth:
   require_face: true
   presence_voice_cooldown_seconds: 6.0
   auto_start_delay_ms: 200
+  camera_triggered_by_sensor: true
+  camera_idle_close_seconds: 10.0
 
 voice_feedback:
   enabled: true

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -131,6 +131,8 @@ class AutoAuthConfig:
     require_face: bool = True
     presence_voice_cooldown_seconds: float = 6.0
     auto_start_delay_ms: int = 200
+    camera_triggered_by_sensor: bool = True
+    camera_idle_close_seconds: float = 10.0
 
 
 @dataclass(frozen=True)

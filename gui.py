@@ -1,10 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import logging
 import sys
 import time
 from dataclasses import replace
+from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -33,18 +34,20 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         self._camera = Camera(config.camera, config.system.dry_run)
         self._sensor = create_presence_sensor(config.sensor, config.system.dry_run)
         self._lock = create_lock_actuator(config.lock, config.system.dry_run or force_lock_dry_run)
-        self._face = create_face_authenticator(config.face)
-        self._liveness = create_liveness_checker(config.liveness)
-        self._speaker = create_speaker_authenticator(config.speaker)
         self._fusion = FusionEngine(config.fusion)
         self._voice = VoiceFeedback(config.voice_feedback)
 
+        self._face = None
+        self._liveness = None
+        self._speaker = None
         self._last_frame: np.ndarray | None = None
         self._last_sensor = False
         self._previous_sensor = False
         self._last_face = AuthResult("face", False, 0.0, "not checked")
         self._auth_in_progress = False
+        self._camera_active = False
         self._last_auto_auth_at = 0.0
+        self._last_presence_at = 0.0
         self._last_presence_voice_at = 0.0
 
         self.setWindowTitle("Jetson 智能门锁 MVP")
@@ -62,7 +65,7 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(12)
 
-        self.video = QtWidgets.QLabel("摄像头画面")
+        self.video = QtWidgets.QLabel("待机中：仅红外检测，摄像头未开启")
         self.video.setMinimumSize(640, 480)
         self.video.setAlignment(QtCore.Qt.AlignCenter)
         self.video.setStyleSheet("background:#111; color:#ccc; border:1px solid #333;")
@@ -73,24 +76,18 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         panel_layout.setSpacing(9)
         layout.addWidget(panel, 1)
 
-        self.step_label = QtWidgets.QLabel("当前步骤：等待启动")
+        self.step_label = QtWidgets.QLabel("当前步骤：待机，仅红外检测")
         self.step_label.setWordWrap(True)
         self.step_label.setMinimumHeight(48)
         self.step_label.setStyleSheet("font-size:18px; font-weight:600; color:#111;")
         panel_layout.addWidget(self.step_label)
 
         self.sensor_label = QtWidgets.QLabel("1. 红外检测：等待")
-        self.face_label = QtWidgets.QLabel("2. 人脸识别：等待")
-        self.live_label = QtWidgets.QLabel("3. 活体检测：等待")
-        self.speaker_label = QtWidgets.QLabel("4. 口令+声纹：等待")
-        self.score_label = QtWidgets.QLabel("5. 融合结果：0.000")
-        for label in (
-            self.sensor_label,
-            self.face_label,
-            self.live_label,
-            self.speaker_label,
-            self.score_label,
-        ):
+        self.face_label = QtWidgets.QLabel("2. 人脸识别：待机，红外触发后开启")
+        self.live_label = QtWidgets.QLabel("3. 活体检测：待机")
+        self.speaker_label = QtWidgets.QLabel("4. 口令+声纹：待机")
+        self.score_label = QtWidgets.QLabel("5. 融合结果：等待")
+        for label in (self.sensor_label, self.face_label, self.live_label, self.speaker_label, self.score_label):
             label.setWordWrap(True)
             label.setMinimumHeight(32)
             panel_layout.addWidget(label)
@@ -108,7 +105,7 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         enroll_buttons.addWidget(self.enroll_voice_btn)
         panel_layout.addLayout(enroll_buttons)
 
-        self.people_label = QtWidgets.QLabel("已注册：暂无")
+        self.people_label = QtWidgets.QLabel("已注册：读取中")
         self.people_label.setWordWrap(True)
         panel_layout.addWidget(self.people_label)
 
@@ -126,7 +123,7 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         buttons.addWidget(self.auth_btn)
         panel_layout.addLayout(buttons)
 
-        self.auto_auth = QtWidgets.QCheckBox("自动认证：红外+人脸通过后自动开始")
+        self.auto_auth = QtWidgets.QCheckBox("自动认证：红外触发后开启摄像头")
         self.auto_auth.setChecked(self._config.auto_auth.enabled)
         panel_layout.addWidget(self.auto_auth)
 
@@ -152,10 +149,11 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         self.refresh_people()
 
     def start(self) -> None:
-        self._set_step("当前步骤：正在启动摄像头和红外传感器")
-        self._append("启动摄像头、人脸识别和红外传感器轮询")
-        self._camera_timer.start(120)
+        self._set_step("当前步骤：待机，仅红外检测")
+        self._append("启动红外传感器轮询；摄像头将在红外检测到靠近后开启")
         self._sensor_timer.start(max(100, int(self._config.sensor.poll_interval_seconds * 1000)))
+        if not self._config.auto_auth.camera_triggered_by_sensor:
+            self._ensure_camera_active("配置为摄像头常开模式")
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self._speak("app_started")
@@ -163,9 +161,8 @@ class SmartLockWindow(QtWidgets.QMainWindow):
     def stop(self) -> None:
         self._set_step("当前步骤：已停止")
         self._append("已停止")
-        self._camera_timer.stop()
         self._sensor_timer.stop()
-        self._camera.close()
+        self._stop_camera("停止程序")
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
 
@@ -178,6 +175,7 @@ class SmartLockWindow(QtWidgets.QMainWindow):
                 self._on_presence_detected()
             else:
                 self.sensor_label.setText("1. 红外检测：等待，未检测到人体")
+                self._maybe_enter_standby()
         except Exception as exc:
             self.sensor_label.setText(f"1. 红外检测：异常，{exc}")
             self._append(f"红外检测异常：{exc}")
@@ -186,7 +184,8 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         try:
             frame = self._camera.read()
             self._last_frame = frame
-            self._last_face = self._face.verify(frame, self._config.system.dry_run)
+            face = self._face_backend()
+            self._last_face = face.verify(frame, self._config.system.dry_run)
             self.face_label.setText(self._format_result("2. 人脸识别", self._last_face))
             self._show_frame(self._draw_face(frame.copy(), self._last_face))
             self._maybe_auto_authenticate()
@@ -196,13 +195,50 @@ class SmartLockWindow(QtWidgets.QMainWindow):
 
     def _on_presence_detected(self) -> None:
         now = time.monotonic()
+        self._last_presence_at = now
         if not self._previous_sensor:
-            self._append("红外检测到有人靠近")
+            self._append("红外检测到有人靠近，开启摄像头和人脸识别")
+            self._ensure_camera_active("红外检测到有人靠近")
         if now - self._last_presence_voice_at >= self._config.auto_auth.presence_voice_cooldown_seconds:
             self._last_presence_voice_at = now
             self._speak("presence")
         if not self._auth_in_progress:
-            self._set_step("当前步骤：检测到靠近，正在等待人脸通过")
+            self._set_step("当前步骤：红外已触发，正在做人脸识别")
+
+    def _maybe_enter_standby(self) -> None:
+        if not self._camera_active or self._auth_in_progress:
+            return
+        if not self._config.auto_auth.camera_triggered_by_sensor:
+            return
+        idle = time.monotonic() - self._last_presence_at
+        if idle >= self._config.auto_auth.camera_idle_close_seconds:
+            self._stop_camera(f"无人靠近超过 {idle:.1f} 秒")
+            self._set_step("当前步骤：回到待机，仅红外检测")
+            self.face_label.setText("2. 人脸识别：待机，红外触发后开启")
+            self.live_label.setText("3. 活体检测：待机")
+            self.speaker_label.setText("4. 口令+声纹：待机")
+            self.video.setText("待机中：仅红外检测，摄像头未开启")
+
+    def _ensure_camera_active(self, reason: str) -> None:
+        if self._camera_active:
+            return
+        self._camera_active = True
+        self._last_frame = None
+        self._last_face = AuthResult("face", False, 0.0, "not checked")
+        self.video.setText("正在开启摄像头...")
+        self.face_label.setText("2. 人脸识别：摄像头开启中")
+        self._append(f"开启摄像头：{reason}")
+        self._camera_timer.start(120)
+
+    def _stop_camera(self, reason: str) -> None:
+        if not self._camera_active and self._last_frame is None:
+            return
+        self._camera_timer.stop()
+        self._camera.close()
+        self._camera_active = False
+        self._last_frame = None
+        self._last_face = AuthResult("face", False, 0.0, "not checked")
+        self._append(f"关闭摄像头：{reason}")
 
     def _maybe_auto_authenticate(self) -> None:
         if not self.auto_auth.isChecked() or self._auth_in_progress:
@@ -228,28 +264,31 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         if not name:
             self._append("人脸采集失败：请先输入姓名")
             return
+        self._ensure_camera_active("手动采集人脸")
         if self._last_frame is None:
             self._update_camera()
         if self._last_frame is None:
             self._append("人脸采集失败：没有摄像头画面")
             return
-        if not hasattr(self._face, "enroll_sample"):
+        face = self._face_backend()
+        if not hasattr(face, "enroll_sample"):
             self._append("人脸采集失败：当前后端不支持注册")
             return
         try:
-            save_path = self._face.enroll_sample(name, self._last_frame)
-            sample_count = self._face.sample_count(name) if hasattr(self._face, "sample_count") else 0
+            save_path = face.enroll_sample(name, self._last_frame)
+            sample_count = face.sample_count(name) if hasattr(face, "sample_count") else 0
             self._append(f"已保存第 {sample_count} 张人脸样本：{save_path}")
             self.refresh_people()
         except Exception as exc:
             self._append(f"人脸采集失败：{self._translate_reason(str(exc))}")
 
     def train_face_model(self) -> None:
-        if not hasattr(self._face, "train"):
+        face = self._face_backend()
+        if not hasattr(face, "train"):
             self._append("刷新失败：当前人脸后端不支持")
             return
         try:
-            count = self._face.train()
+            count = face.train()
             self._append(f"人脸库已刷新，共 {count} 个样本")
             self.refresh_people()
         except Exception as exc:
@@ -261,7 +300,8 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         if not name:
             self._append("声纹采集失败：请先输入姓名")
             return
-        if not hasattr(self._speaker, "enroll_microphone"):
+        speaker = self._speaker_backend()
+        if not hasattr(speaker, "enroll_microphone"):
             self._append("声纹采集失败：当前后端不支持麦克风注册")
             return
         try:
@@ -269,8 +309,8 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             self._append(f"正在录制声纹，时长 {self._config.speaker.record_seconds:.1f} 秒；请说：{phrase}")
             self._speak("voice_prompt", f"请说出口令：{phrase}", force=True, block=True)
             QtWidgets.QApplication.processEvents()
-            save_path = self._speaker.enroll_microphone(name)
-            sample_count = self._speaker.sample_count(name) if hasattr(self._speaker, "sample_count") else 0
+            save_path = speaker.enroll_microphone(name)
+            sample_count = speaker.sample_count(name) if hasattr(speaker, "sample_count") else 0
             self._append(f"已保存第 {sample_count} 条声纹样本：{save_path}")
             self._set_step("当前步骤：声纹采集完成")
             self.refresh_people()
@@ -279,16 +319,16 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             self._set_step("当前步骤：声纹采集失败")
 
     def refresh_people(self) -> None:
-        face_people = self._face.people() if hasattr(self._face, "people") else []
-        voice_people = self._speaker.people() if hasattr(self._speaker, "people") else []
-        people = sorted(set(face_people) | set(voice_people))
+        people = sorted(self._face_people_from_disk() | self._voice_people_from_disk())
         if not people:
             self.people_label.setText("已注册：暂无")
             return
         details = []
         for name in people:
-            face_count = self._face.sample_count(name) if hasattr(self._face, "sample_count") else 0
-            voice_count = self._speaker.sample_count(name) if hasattr(self._speaker, "sample_count") else 0
+            face_count = self._count_files(Path(self._config.face.embedding_dir) / name, {".npy", ".json"})
+            if face_count == 0:
+                face_count = self._count_files(Path(self._config.face.data_dir) / name, {".png", ".jpg", ".jpeg"})
+            voice_count = self._count_files(Path(self._config.speaker.voice_dir) / name, {".npy", ".json"})
             details.append(f"{name} 人脸:{face_count} 声纹:{voice_count}")
         self.people_label.setText("已注册：" + "；".join(details))
 
@@ -301,6 +341,7 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         started = time.monotonic()
 
         try:
+            self._ensure_camera_active("开始认证")
             if self._last_frame is None:
                 self._update_camera()
             if self._last_frame is None:
@@ -318,7 +359,8 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             QtWidgets.QApplication.processEvents()
 
             self._set_step("当前步骤：2/5 人脸识别，请正对摄像头")
-            face_result = self._face.verify(self._last_frame, self._config.system.dry_run)
+            face = self._face_backend()
+            face_result = face.verify(self._last_frame, self._config.system.dry_run)
             self.face_label.setText(self._format_result("2. 人脸识别", face_result))
             self._speak("face_pass" if face_result.passed else "face_fail")
             QtWidgets.QApplication.processEvents()
@@ -355,14 +397,16 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             self._auth_in_progress = False
             self._last_auto_auth_at = time.monotonic()
             self.auth_btn.setEnabled(True)
+            self._maybe_enter_standby()
 
     def _verify_voice_command(self, phrase: str) -> AuthResult:
-        if hasattr(self._speaker, "verify_microphone"):
-            result = self._speaker.verify_microphone()
-        elif hasattr(self._speaker, "verify_phrase"):
-            result = self._speaker.verify_phrase(phrase)
+        speaker = self._speaker_backend()
+        if hasattr(speaker, "verify_microphone"):
+            result = speaker.verify_microphone()
+        elif hasattr(speaker, "verify_phrase"):
+            result = speaker.verify_phrase(phrase)
         else:
-            result = self._speaker.verify(self._config.system.dry_run)
+            result = speaker.verify(self._config.system.dry_run)
 
         metadata = dict(result.metadata)
         metadata["command_phrase"] = phrase
@@ -384,13 +428,7 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         ):
             metadata = dict(speaker_result.metadata)
             metadata["face_identity"] = face_identity
-            return AuthResult(
-                "speaker",
-                False,
-                speaker_result.score,
-                "voice identity does not match face",
-                metadata,
-            )
+            return AuthResult("speaker", False, speaker_result.score, "voice identity does not match face", metadata)
         return speaker_result
 
     def _on_auth_passed(self, elapsed: float) -> None:
@@ -438,8 +476,9 @@ class SmartLockWindow(QtWidgets.QMainWindow):
                 return AuthResult("liveness", False, 0.0, f"camera failed: {exc}")
             self._last_frame = frame
             frames.append(frame.copy())
-            if hasattr(self._face, "detect_largest_face"):
-                bbox, _ = self._face.detect_largest_face(frame)
+            face = self._face_backend()
+            if hasattr(face, "detect_largest_face"):
+                bbox, _ = face.detect_largest_face(frame)
                 if bbox is not None:
                     x, _y, w, _h = bbox
                     centers.append((x + w / 2.0) / frame.shape[1])
@@ -448,16 +487,15 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             QtWidgets.QApplication.processEvents()
             time.sleep(0.08)
 
-        if hasattr(self._liveness, "verify_frames"):
-            live_result = self._liveness.verify_frames(frames)
+        liveness = self._liveness_backend()
+        if hasattr(liveness, "verify_frames"):
+            live_result = liveness.verify_frames(frames)
             if live_result.passed or not centers:
                 return live_result
-
             fallback = self._fallback_motion_liveness(centers)
             if fallback.score > live_result.score:
                 return fallback
             return live_result
-
         return self._fallback_motion_liveness(centers)
 
     def _fallback_motion_liveness(self, centers: list[float]) -> AuthResult:
@@ -469,14 +507,36 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         reason = f"motion={motion:.3f}" if passed else f"motion too small ({motion:.3f})"
         return AuthResult("liveness", passed, float(score), reason, {"motion": motion})
 
+    def _face_backend(self):
+        if self._face is None:
+            self._set_step("当前步骤：正在加载人脸识别模型")
+            self._append("加载 InsightFace 人脸识别后端")
+            QtWidgets.QApplication.processEvents()
+            self._face = create_face_authenticator(self._config.face)
+        return self._face
+
+    def _liveness_backend(self):
+        if self._liveness is None:
+            self._set_step("当前步骤：正在加载活体检测模型")
+            self._append("加载 MediaPipe 活体检测后端")
+            QtWidgets.QApplication.processEvents()
+            self._liveness = create_liveness_checker(self._config.liveness)
+        return self._liveness
+
+    def _speaker_backend(self):
+        if self._speaker is None:
+            self._set_step("当前步骤：正在加载声纹识别模型")
+            self._append("加载 SpeechBrain 声纹识别后端")
+            QtWidgets.QApplication.processEvents()
+            self._speaker = create_speaker_authenticator(self._config.speaker)
+        return self._speaker
+
     def _show_frame(self, frame: np.ndarray) -> None:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         image = QtGui.QImage(rgb.data, w, h, ch * w, QtGui.QImage.Format_RGB888).copy()
         pixmap = QtGui.QPixmap.fromImage(image)
-        self.video.setPixmap(
-            pixmap.scaled(self.video.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-        )
+        self.video.setPixmap(pixmap.scaled(self.video.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
 
     @staticmethod
     def _draw_face(frame: np.ndarray, result: AuthResult) -> np.ndarray:
@@ -485,15 +545,7 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             x, y, w, h = bbox
             color = (0, 220, 0) if result.passed else (0, 180, 255)
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-            cv2.putText(
-                frame,
-                f"face {result.score:.2f}",
-                (x, max(20, y - 10)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                color,
-                2,
-            )
+            cv2.putText(frame, f"face {result.score:.2f}", (x, max(20, y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
         return frame
 
     def _append(self, message: str) -> None:
@@ -502,13 +554,7 @@ class SmartLockWindow(QtWidgets.QMainWindow):
     def _set_step(self, message: str) -> None:
         self.step_label.setText(message)
 
-    def _speak(
-        self,
-        key: str,
-        text: str | None = None,
-        force: bool = False,
-        block: bool | None = None,
-    ) -> None:
+    def _speak(self, key: str, text: str | None = None, force: bool = False, block: bool | None = None) -> None:
         if self.voice_enabled.isChecked():
             self._voice.speak(key, text=text, force=force, block=block)
 
@@ -521,6 +567,27 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         identity = result.metadata.get("identity")
         identity_text = f"，身份：{identity}" if identity else ""
         return f"{title}：{status}，分数 {result.score:.2f}{identity_text}，{reason}"
+
+    @staticmethod
+    def _face_people_from_disk() -> set[str]:
+        return SmartLockWindow._people_dirs([Path("database/face_embeddings"), Path("database/faces")])
+
+    def _voice_people_from_disk(self) -> set[str]:
+        return self._people_dirs([Path(self._config.speaker.voice_dir)])
+
+    @staticmethod
+    def _people_dirs(roots: list[Path]) -> set[str]:
+        people: set[str] = set()
+        for root in roots:
+            if root.exists():
+                people.update(p.name for p in root.iterdir() if p.is_dir())
+        return people
+
+    @staticmethod
+    def _count_files(root: Path, suffixes: set[str]) -> int:
+        if not root.exists():
+            return 0
+        return sum(1 for path in root.iterdir() if path.is_file() and path.suffix.lower() in suffixes)
 
     @staticmethod
     def _cn_pass(passed: bool) -> str:
@@ -568,7 +635,7 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         self.stop()
         self._sensor.close()
         self._lock.close()
-        if hasattr(self._liveness, "close"):
+        if self._liveness is not None and hasattr(self._liveness, "close"):
             self._liveness.close()
         event.accept()
 
