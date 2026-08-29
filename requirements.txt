@@ -1,0 +1,11 @@
+numpy<2
+opencv-contrib-python<5
+PyYAML
+pyserial
+PySide6
+insightface
+mediapipe
+librosa
+sounddevice
+requests
+speechbrain

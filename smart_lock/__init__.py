@@ -1,0 +1,2 @@
+"""Smart lock MVP package."""
+

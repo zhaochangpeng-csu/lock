@@ -1,0 +1,130 @@
+system:
+  dry_run: false
+  log_level: INFO
+  cooldown_seconds: 5.0
+  max_attempt_seconds: 12.0
+
+camera:
+  index: 0
+  width: 640
+  height: 480
+  warmup_frames: 5
+  mock_when_unavailable_in_dry_run: true
+
+sensor:
+  # Options: serial_infrared, gpio_infrared, mock
+  type: serial_infrared
+  pin: 7
+  active_high: true
+  poll_interval_seconds: 0.1
+  mock_trigger_interval_seconds: 8.0
+  serial:
+    port_candidates:
+      - "/dev/ttyUSB0"
+      - "/dev/ttyUSB1"
+      - "COM3"
+    baudrate: 9600
+    timeout_seconds: 0.5
+    # Original code: bytes.fromhex(body_command), ser.write(cmd), ser.read(7).
+    # If your old config.ini has body_command, paste that exact hex string here.
+    command_hex: "02 03 00 04 00 01 C5 F8"
+    response_bytes: 7
+    value_hex_start: 6
+    value_hex_end: 10
+    detected_value: 1
+
+lock:
+  relay_pin: 11
+  active_high: true
+  unlock_seconds: 2.0
+
+face:
+  enabled: true
+  backend: insightface
+  min_score: 0.65
+  accept_any_detected_face_in_dry_run: true
+  accept_mock_frame_in_dry_run: true
+  haar_scale_factor: 1.1
+  haar_min_neighbors: 5
+  min_face_size: 80
+  data_dir: "database/faces"
+  model_path: "models/lbph_face.yml"
+  labels_path: "models/face_labels.json"
+  width: 160
+  height: 160
+  lbph_confidence_max: 90.0
+  insightface_model: "buffalo_sc"
+  insightface_root: "models/insightface"
+  insightface_det_size:
+    - 640
+    - 640
+  insightface_ctx_id: -1
+  embedding_dir: "database/face_embeddings"
+
+liveness:
+  enabled: true
+  backend: mediapipe
+  min_score: 0.6
+  pass_in_dry_run: true
+  duration_seconds: 3.0
+  min_motion_ratio: 0.08
+  mediapipe_model_path: "models/mediapipe/face_landmarker.task"
+  min_blink_ear_drop: 0.03
+  min_head_yaw_motion: 0.045
+
+speaker:
+  enabled: true
+  backend: speechbrain_ecapa
+  min_score: 0.7
+  passphrase: "你好"
+  pass_in_dry_run: true
+  voice_dir: "database/voices"
+  input_device: 2
+  sample_rate: 16000
+  record_seconds: 2.5
+  n_mfcc: 13
+  min_voice_samples: 1
+  speechbrain_source: "speechbrain/spkrec-ecapa-voxceleb"
+  speechbrain_savedir: "models/speechbrain/spkrec-ecapa-voxceleb"
+
+auto_auth:
+  enabled: true
+  cooldown_seconds: 8.0
+  require_sensor: true
+  require_face: true
+  presence_voice_cooldown_seconds: 6.0
+  auto_start_delay_ms: 200
+
+voice_feedback:
+  enabled: true
+  backend: aplay_pcm
+  pcm_dir: "audio_prompts"
+  pcm_device: "plughw:Device"
+  pcm_rate: 16000
+  pcm_format: "S16_LE"
+  pcm_channels: 1
+  cooldown_seconds: 1.2
+  block: false
+  fallback_to_tts_command: true
+  messages:
+    app_started: "智能门锁已启动"
+    presence: "检测到有人靠近，请正对摄像头"
+    auto_start: "检测到红外和人脸，开始自动认证"
+    face_pass: "人脸识别通过"
+    face_fail: "人脸识别失败，请正对摄像头"
+    liveness_prompt: "请眨眼一次，并左右转头"
+    liveness_pass: "活体检测通过"
+    liveness_fail: "活体检测失败，请重新眨眼并转头"
+    voice_prompt: "请说出口令：你好"
+    voice_pass: "声纹识别通过"
+    voice_fail: "声纹识别失败，请重新说出口令"
+    auth_pass: "认证通过，欢迎回家"
+    auth_fail: "认证失败，请重试"
+
+fusion:
+  threshold: 0.78
+  weights:
+    face: 0.45
+    liveness: 0.25
+    speaker: 0.20
+    sensor: 0.10

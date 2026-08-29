@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.env
+.venv/
+venv/
+logs/
+database/
+models/
+*.tar.gz
+*.zip
+audio_prompts/*.pcm
