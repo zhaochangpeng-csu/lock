@@ -1,4 +1,4 @@
-# 智能门锁最终实现方案 v2.0
+# 智能门锁最终实现方案 v2.1
 
 > 本文档是最终确认的实现方案，取代 v1.x 中“本地 DoorAgent allow/deny/escalate 旁路评审”的旧设计。
 > 旧方案相关内容仅保留在 Git 历史中，不再作为运行依据。
@@ -24,21 +24,20 @@
    - 不追求大模型；ASR/TTS 优先选择可在 aarch64 CPU 上运行的轻量方案。
    - 最终本地 TTS 选型为 `sherpa-onnx`（VITS/Piper 语音模型），不直接使用 `piper-tts`。
 
-## 2. 目标体验
+## 2. 当前 MVP 体验与后续目标
 
-用户在门口的自然交互：
+当前已经实现并作为默认运行依据的流程：
 
 ```text
 人靠近门口
-  → Agent 主动打招呼
-  → 后台同时开始人脸 + 活体 + 声纹识别
-  → 用户直接和 Agent 连续对话
-  → 认证通过后，用户说“开门”
+  → 先完成人脸 + 活体 + 声纹融合认证
+  → 认证通过并签发一次性凭证
+  → Pipecat 打开麦克风，用户说“开门”
   → Agent 读取硬件凭证并请求开门
   → Jetson 本地安全闸门验证后开锁
 ```
 
-陌生人同样可以对话和咨询，但在没有有效硬件凭证时，任何对话都不能开门；必要时 Agent 调用 `notify_owner`。
+这种顺序避免 GUI 声纹认证与 Agent 抢占同一个麦克风。未来可评估“对话音频同时用于声纹累积”，但它不是当前成果。陌生人或认证失败会写入异常事件；当前 Agent 在没有有效凭证时不能开门。
 
 ## 3. 系统架构
 
@@ -52,6 +51,7 @@
 │  Pipecat 连续对话（VAD / 打断 / 轮流说话）                   │
 │  本地 ASR（小模型） + 本地 TTS（sherpa-onnx VITS/Piper）     │
 │  lock_tool_gateway.py：受控 HTTP 工具 + 安全闸门 + GPIO       │
+│  lock_event_service.py：异常事件 → latest_event.json          │
 └──────────────┬─────────────────────────────────────────────┘
                │ HTTP（Bearer Token，仅 LAN / Docker bridge）
 ┌──────────────▼─────────────────────────────────────────────┐
@@ -67,8 +67,9 @@
 - **FastGPT/DeepSeek**：只做语言理解和工具编排。
 - **Jetson 网关**：只验证凭证和干运行开关，最终驱动继电器。
 - **Pipecat**：只做音频流水线、轮流说话、打断和流式编排，不参与安全判定。
+- **异常服务**：只记录认证失败，故障不能影响融合判定、凭证或开锁。
 
-## 4. 最终开门状态机
+## 4. 当前开门状态机
 
 ```text
 IDLE
@@ -76,17 +77,15 @@ IDLE
   ↓ 红外 detected
 APPROACH
   打开摄像头
-  启动后台认证会话：人脸跟踪 + 活体序列 + 声纹累积
-  启动 Pipecat 语音对话，Agent 主动问候
+  依次执行人脸、活体、声纹认证
   ↓
-CONVERSING
-  用户连续说话，Agent 回应
-  - 用户语音段 → ASR → FastGPT
-  - 用户语音段 → 声纹嵌入累积
-  - 摄像头持续做人脸识别与活体检测
-  ↓ face + liveness + speaker 全通过且人脸/声纹身份一致
+AUTHENTICATING
+  本地融合判定
+  - 失败：旁路写入异常事件，不改变原硬件判定
+  - 通过：签发一次性凭证
+  ↓
 CREDENTIAL_READY
-  写入或刷新 fusion_passed=true 的一次性凭证
+  Pipecat 打开麦克风并提示用户说开门指令
   Agent 不读取具体分数，只通过 current_auth_context 读取状态
   ↓ 用户表达开门意图
 Agent:
@@ -97,9 +96,8 @@ Agent:
 UNLOCK
   消费凭证，驱动 GPIO 继电器
   ↓ 红外持续无人超过阈值 / 会话超时
-BYE
-  Agent 道别
-  关闭摄像头与音频会话
+RESET
+  人员离开后关闭摄像头与音频会话
   作废凭证
   → IDLE
 ```
@@ -118,23 +116,24 @@ BYE
   - 时间窗口：`now - time <= auth_context_max_age_seconds`
 - 消费语义：
   - `request_unlock` 成功后，凭证立即标记为已消费，重复请求必须被拒绝。
-- 在场刷新：
-  - 连续对话期间，只要后台认证条件仍然成立，由本地认证状态机周期性刷新凭证时间。
-  - 红外持续无人或会话结束，立即作废凭证。
+- 当前生命周期：
+  - 每次融合通过签发一个新凭证；失败重试不会覆盖仍有效且未消费的通过凭证。
+  - 人员离开、会话重置或监督脚本重启时删除凭证。
+  - 周期性在场刷新不是当前实现，若未来需要超过 300 秒的长会话再增加。
 - 配置：
   - 已设置 `auth_context_max_age_seconds: 300`。
-  - 连续对话接入后配套“在场刷新 + 离开作废”。
+  - 已实现离开作废和启动清理。
 
 ## 6. Agent 与工具（只做受控操作）
 
-FastGPT 应用只注册以下工具：
+当前 FastGPT 智能门锁应用只注册以下两个安全必需工具：
 
 | 工具 | 方法/路径 | 用途 |
 |---|---|---|
 | `current_auth_context` | GET `/tools/current_auth_context` | 读取最新硬件认证凭证状态 |
-| `query_whitelist` | POST `/tools/query_whitelist` | 查询人脸/声纹登记信息 |
-| `notify_owner` | POST `/tools/notify_owner` | 请求通知业主 |
 | `request_unlock` | POST `/tools/request_unlock` | 请求开锁，最终由 Jetson 安全闸门裁决 |
+
+网关代码仍保留 `query_whitelist` 和未接通知后端的 `notify_owner` 原型，但它们不属于当前 FastGPT 发布配置。通知链路后续由 WorkBuddy/Bot 任务承接。
 
 禁止事项：
 
@@ -149,7 +148,7 @@ FastGPT 应用只注册以下工具：
 
 - 后端：SpeechBrain `spkrec-ecapa-voxceleb`，文本无关。
 - 已删除 `speaker.passphrase` 配置、GUI 口令输入框和所有“请说口令”提示。
-- 采集：`sounddevice -> PortAudio -> ALSA`，16 kHz，单声道。
+- 采集：`sounddevice -> PortAudio -> PulseAudio 默认输入源`，16 kHz，单声道。
 - 已新增 `verify_audio(audio)`：直接对任意语音片段做文本无关声纹识别。
 - 已新增 `SpeakerAudioAccumulator`：累积 VAD 用户语音段，达到 `min_speech_seconds` 后交给 `verify_audio`。
 
@@ -173,7 +172,7 @@ FastGPT 应用只注册以下工具：
 
 - GUI 点击“启动”后先预加载 InsightFace、MediaPipe、SpeechBrain，再开始红外轮询。
 - `voice_agent_pipecat.py --wait-auth` 在后台预加载 FunASR，并等待新鲜硬件凭证；凭证写入后才打开麦克风，避免和 GUI 声纹录音冲突。
-- `run_smart_lock.sh` 幂等启动并监督 gateway / agent / GUI，启动时清理旧凭证。
+- `run_smart_lock.sh` 幂等启动并监督 gateway / event service / agent / GUI，启动时清理旧凭证和临时文件。
 - 红外检测增加 `presence_hold_seconds` 状态保持，提示音只在无人→有人上升沿播报一次。
 
 ### 8.1 Pipecat 的职责
@@ -207,14 +206,13 @@ FastGPT 应用只注册以下工具：
 
 ### 9.2 TTS
 
-- 当前在线：`edge-tts`，延迟和网络依赖不适合最终连续对话。
-- 最终本地 TTS：`sherpa-onnx` + VITS/Piper 中文语音模型。
+- 当前 Pipecat 已优先使用本地 `sherpa-onnx` + VITS/Piper 中文语音模型，失败后再降级到 `edge-tts`，最后尝试 espeak。
   - 已验证 `sherpa-onnx 1.13.6` 提供 aarch64 Python 3.8 manylinux 轮子。
   - `piper-tts` 直装方案不可行：`piper-phonemize` 无 aarch64 预编译轮子。
   - WSL 冒烟通过：`vits-piper-zh_CN-xiao_ya-medium-int8`（13.4 MB）合成出有效中文 WAV。
   - 该冒烟语音的模型卡标注为 non-commercial，仅用于验证；最终语音需选择许可证合适的模型。
 - 播放协议不变：TTS 输出 → ffmpeg 转 S16LE 16 kHz 单声道 → `aplay -D plughw:Device`。
-- Windows/WSL 开发机可使用 edge-tts 或本机播放器做功能预验收，不代表 Jetson 协议。
+- Windows 开发机使用 sounddevice 输出；Jetson 固定使用上述 `aplay` 协议。
 
 ### 9.3 Jetson 资源预算
 
@@ -243,11 +241,26 @@ agent:
     auth_context_max_age_seconds: 300
     auth_context_path: "logs/auth_context.json"
     auth_context_path_env: "LOCK_AUTH_CONTEXT_PATH"
+
+event_reporting:
+  enabled: true
+  service_url: "http://127.0.0.1:8790"
+  unknown_face_delay_seconds: 3.0
 ```
 
 已删除的旧配置：`agent.enabled / mode / backend / audit_log_path / llm / decision / tools`、`speaker.passphrase`、口令后端以及本地 DoorAgent 相关代码。
 
-## 11. 实施阶段
+## 11. 异常事件最小闭环
+
+- GUI 中红外持续有人且 3 秒无法识别人脸时，自动上报一次 `abnormal_behavior`。
+- 完整融合认证失败时也会上报；同一次人员停留只保留一次成功上报，人员离开后重新布防。
+- 无界面 `SmartLockController` 在摄像头异常或融合失败时同样上报。
+- `lock_event_service.py` 在 `127.0.0.1:8790` 提供记录、读取和 processed 接口，并用临时文件替换保证原子写入。
+- 当前 `latest_event.json` 只保留最新一条事件，是快速验证方案，不等同于生产事件队列。
+- WorkBuddy 的同步脚本和任务提示词已经写好；Bot渠道和正式定时任务后续接入。
+- 事件上报是非权威旁路：服务宕机、超时或通知失败都不能改变硬件融合结果。
+
+## 12. 实施阶段
 
 - **Phase A：现状收敛（已完成）**
   - 清理旧 DoorAgent 配置与死代码。
@@ -257,20 +270,25 @@ agent:
   - 新增 `verify_audio` 与 `SpeakerAudioAccumulator`。
   - GUI/后台状态机已去掉口令提示。
   - 已验证 `face.identity == speaker.identity` 逻辑保留。
-  - 待 Pipecat 接入时，把 VAD 用户语音段实际喂给 accumulator。
+  - 当前默认仍由 GUI 单独录制声纹；把 Pipecat VAD 语音段喂给 accumulator 属于后续优化。
 - **Phase C：Pipecat 连续对话（基础验证完成）**
-  - `voice_agent_pipecat.py` 已实现：Silero VAD、用户打断、FunASR、FastGPT 流式、EdgeTTS、动态音频设备。
+  - `voice_agent_pipecat.py` 已实现：Silero VAD、用户打断、FunASR、FastGPT 流式、本地 sherpa-onnx 优先 TTS。
   - WSL 文件链路、Windows 真麦克风、Jetson 真麦克风/音箱均已跑通。
   - 工具调用链路（current_auth_context → request_unlock）已通过。
-  - 待持续验证：长时间回声消除、打断体验和延迟。
+  - Jetson 输出已改为统一 ALSA `aplay` 协议，最新改动待板端重新同步验证。
+  - 待持续验证：长时间回声消除、打断体验和端到端延迟。
 - **Phase D：Jetson 集成**
   - Pipecat/Jetson 依赖方案已确定并验证：`pipecat-ai==0.0.108 --no-deps` + `numba==0.60.0` + `onnxruntime==1.16.3` + `soxr==0.5.0.post1`；全部依赖已确认有 aarch64 cp310 轮子。
   - 安装入口：`deploy/install_jetson_agent.sh`，预检：`deploy/check_jetson_agent.py`。
   - sherpa-onnx 小 ASR + 本地 VITS TTS 基准测试。
   - 整机内存/延迟/回声测试。
   - 真机安全回归：`immediate` + `agent_confirm` 两条路径。
+- **Phase E：异常事件（本机实现完成，板端待复测）**
+  - 认证失败自动上报、单事件文件、processed 标记均已实现。
+  - 事件服务 start/restart/stop/crash/recovery 和端口清理已通过。
+  - 待 SSH 恢复后同步开发板，并接入 WorkBuddy/Bot 定时通知。
 
-## 12. 验收清单
+## 13. 验收清单
 
 1. Windows：麦克风 → ASR → FastGPT → TTS 完整一圈。
 2. FastGPT：有效凭证时依次调用 `current_auth_context` → `request_unlock`；无效凭证时拒绝且不调用 `request_unlock`。
@@ -278,3 +296,4 @@ agent:
 4. Jetson：红外、摄像头、人脸、活体、文本无关声纹、GPIO 原功能回归。
 5. Jetson：连续对话、打断、低延迟达标；资源监控通过。
 6. 安全：凭证一次性消费；过期/离开作废；Agent 不能裸开锁。
+7. 异常：陌生人超时和融合失败能写入事件；服务故障不影响认证；通知成功后才能标记 processed。

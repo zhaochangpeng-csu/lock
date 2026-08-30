@@ -1,6 +1,6 @@
 # Smart Lock Agent Deployment
 
-> 最终实现方案以 `docs/LLM_AGENT_PLAN.md`（v2.0）为准。本文件记录部署步骤与验证状态。
+> 最终实现方案以 `docs/LLM_AGENT_PLAN.md`（v2.1）为准。本文件记录部署步骤与验证状态。
 
 ## Current Verification Status
 
@@ -16,7 +16,7 @@ Validated in the current WSL environment (2026-08-30):
 - FastGPT streaming is usable: `/api/v1/chat/completions` with `stream: true` returns `text/event-stream` SSE chunks.
 - FastGPT tool-call chain passed with a fresh dry-run credential: `current_auth_context` was called before `request_unlock`, and the dry-run safety gate returned `allowed=false`.
 - `deploy/configure_fastgpt_agent.py` idempotently creates/updates and publishes the `智能门锁管家` Agent and its HTTP toolset.
-- A real FastGPT conversation called `notify_owner`; an unlock request called `current_auth_context` and did not call `request_unlock` when authentication was stale.
+- A legacy prototype conversation called `notify_owner`; the current published FastGPT lock app intentionally registers only `current_auth_context` and `request_unlock`.
 - The Jetson tool gateway start, restart, forced-stop recovery, authentication, dry-run gate, and port cleanup tests pass in WSL.
 - The text path `voice_agent.py -> FastGPT -> DeepSeek -> Jetson HTTP tool` is working.
 - SenseVoiceSmall and FSMN-VAD were downloaded under `models/funasr`, loaded successfully on CPU, and transcribed the bundled Chinese sample. The WSL process peaked at about 3.62 GB RAM, so this model must pass a Jetson whole-system memory test before it is accepted.
@@ -94,8 +94,9 @@ Jetson edge device (validated on Orin NX):
   face / liveness / speaker recognition
   Pipecat continuous voice agent + voice_agent.py fallback
   FunASR/SenseVoice today; smaller sherpa-onnx streaming ASR is the next step
-  edge-tts TTS today; local sherpa-onnx VITS/Piper TTS is the next step
+  local sherpa-onnx VITS/Piper TTS first; edge-tts/espeak fallback
   authenticated lock tool gateway
+  local abnormal-event service and latest_event.json
 
 Local PC or server:
   FastGPT
@@ -372,12 +373,10 @@ After FastGPT is stopped and ports are free, run the full lifecycle test:
 
 ## FastGPT Tools
 
-Register these HTTP tools in the FastGPT smart-lock app:
+Register only these HTTP tools in the current FastGPT smart-lock app:
 
 ```text
 GET  {JETSON_TOOL_BASE}/tools/current_auth_context
-POST {JETSON_TOOL_BASE}/tools/query_whitelist
-POST {JETSON_TOOL_BASE}/tools/notify_owner
 POST {JETSON_TOOL_BASE}/tools/request_unlock
 ```
 
@@ -391,15 +390,15 @@ Do not register a raw `unlock` tool. FastGPT and DeepSeek may only request `requ
 
 The Python voice client prompt is configurable at `agent.system_prompt` in `config.yaml`. The authoritative FastGPT Agent prompt and tool workflow are in `deploy/fastgpt_agent_config.json` and are published by `deploy/configure_fastgpt_agent.py`; manual UI configuration is only a fallback.
 
-Initial tool schemas:
+Current input schema:
 
 ```json
 {
-  "query_whitelist": {"person": "string"},
-  "notify_owner": {"message": "string"},
   "request_unlock": {"reason": "string"}
 }
 ```
+
+The gateway still contains `query_whitelist` and a mock `notify_owner` prototype, but the versioned FastGPT app configuration does not publish them. WorkBuddy/Bot will own notifications in the next phase.
 
 See `deploy/FASTGPT_TOOLS.md` for the complete FastGPT tool setup and prompt guardrail.
 

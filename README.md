@@ -1,6 +1,6 @@
 # Jetson 智能门锁 MVP 使用说明
 
-> 最终实现方案以 `docs/LLM_AGENT_PLAN.md`（v2.0）为准。
+> 最终实现方案以 `docs/LLM_AGENT_PLAN.md`（v2.1）为准；PPT材料见 `docs/PPT_REPORT.md`。
 > 当前已落地：硬件融合认证后签发一次性短时凭证，由语音 Agent 在对话中请求开锁。
 > 声纹识别为文本无关，不再要求固定口令。
 > Pipecat 连续对话已在 WSL/Windows/Jetson 上完成验证；`voice_agent.py` 保留为固定时长单轮降级入口。
