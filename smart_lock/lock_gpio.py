@@ -47,8 +47,10 @@ class JetsonRelayLockActuator:
     def unlock(self) -> None:
         LOGGER.info("Unlock relay pulse: %.2f seconds", self._unlock_seconds)
         self._GPIO.output(self._pin, self._active_value)
-        time.sleep(self._unlock_seconds)
-        self._GPIO.output(self._pin, self._inactive_value)
+        try:
+            time.sleep(self._unlock_seconds)
+        finally:
+            self._GPIO.output(self._pin, self._inactive_value)
 
     def close(self) -> None:
         self._GPIO.output(self._pin, self._inactive_value)

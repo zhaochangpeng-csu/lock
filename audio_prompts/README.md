@@ -16,8 +16,8 @@ aplay audio_prompts/presence.pcm -r 16000 -f S16_LE -c 1 -D plughw:Device
 - `liveness_prompt.pcm`：请眨眼一次，并左右转头
 - `liveness_pass.pcm`：活体检测通过
 - `liveness_fail.pcm`：活体检测失败，请重新眨眼并转头
-- `voice_prompt.pcm`：请说出口令：你好
+- `voice_prompt.pcm`：请自然说话，完成声纹识别
 - `voice_pass.pcm`：声纹识别通过
-- `voice_fail.pcm`：声纹识别失败，请重新说出口令
+- `voice_fail.pcm`：声纹识别失败，请重新自然说一句话
 - `auth_pass.pcm`：认证通过，欢迎回家
 - `auth_fail.pcm`：认证失败，请重试

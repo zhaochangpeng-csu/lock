@@ -18,30 +18,8 @@ class SpeakerAuthenticator(Protocol):
     def verify(self, dry_run: bool) -> AuthResult:
         ...
 
-
-class MvpPassphraseSpeakerAuthenticator:
-    """Console passphrase placeholder for WeSpeaker/SpeechBrain verification."""
-
-    def __init__(self, config: SpeakerConfig) -> None:
-        self._config = config
-
-    def verify(self, dry_run: bool) -> AuthResult:
-        if dry_run and self._config.pass_in_dry_run:
-            return AuthResult("speaker", True, 1.0, "dry-run speaker accepted")
-
-        try:
-            phrase = input("Say/type passphrase: ").strip()
-        except EOFError:
-            return AuthResult("speaker", False, 0.0, "no passphrase input")
-
-        passed = phrase.lower() == self._config.passphrase.lower()
-        return self.verify_phrase(phrase)
-
-    def verify_phrase(self, phrase: str) -> AuthResult:
-        passed = phrase.strip().lower() == self._config.passphrase.lower()
-        score = 1.0 if passed else 0.0
-        reason = "passphrase matched" if passed else "passphrase mismatch"
-        return AuthResult("speaker", passed, score, reason)
+    def verify_audio(self, audio: np.ndarray) -> AuthResult:
+        ...
 
 
 class LocalMfccSpeakerAuthenticator:
@@ -71,11 +49,18 @@ class LocalMfccSpeakerAuthenticator:
         return save_path
 
     def verify_microphone(self) -> AuthResult:
+        return self.verify_audio(self._record_audio())
+
+    def verify_audio(self, audio: np.ndarray) -> AuthResult:
         profiles = self._load_profiles()
         if not profiles:
             return AuthResult("speaker", False, 0.0, "voice model not enrolled")
 
-        audio = self._record_audio()
+        audio = self._normalize_audio(audio)
+        not_enough = self._not_enough_voice_error(audio)
+        if not_enough is not None:
+            return not_enough
+
         embedding = self._extract_embedding(audio)
         best_name = "unknown"
         best_score = 0.0
@@ -116,10 +101,24 @@ class LocalMfccSpeakerAuthenticator:
         )
         sd.wait()
         audio = audio.reshape(-1)
-        peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
-        if peak > 0:
-            audio = audio / peak
-        return audio
+        return self._normalize_audio(audio)
+
+    @staticmethod
+    def _normalize_audio(audio: np.ndarray) -> np.ndarray:
+        array = np.asarray(audio, dtype=np.float32).reshape(-1)
+        peak = float(np.max(np.abs(array))) if array.size else 0.0
+        return array / peak if peak > 0 else array
+
+    def _not_enough_voice_error(self, audio: np.ndarray) -> AuthResult | None:
+        seconds = len(audio) / float(self._config.sample_rate) if self._config.sample_rate else 0.0
+        if seconds < self._config.min_speech_seconds:
+            return AuthResult(
+                "speaker",
+                False,
+                0.0,
+                f"not enough voice audio: {seconds:.2f}s < {self._config.min_speech_seconds:.2f}s",
+            )
+        return None
 
     def _load_profiles(self) -> dict[str, list[np.ndarray]]:
         root = Path(self._config.voice_dir)
@@ -211,11 +210,18 @@ class SpeechBrainSpeakerAuthenticator(LocalMfccSpeakerAuthenticator):
         return save_path
 
     def verify_microphone(self) -> AuthResult:
+        return self.verify_audio(self._record_audio())
+
+    def verify_audio(self, audio: np.ndarray) -> AuthResult:
         profiles = self._load_speechbrain_profiles()
         if not profiles:
             return AuthResult("speaker", False, 0.0, "voice model not enrolled")
 
-        audio = self._record_audio()
+        audio = self._normalize_audio(audio)
+        not_enough = self._not_enough_voice_error(audio)
+        if not_enough is not None:
+            return not_enough
+
         embedding = self._extract_speechbrain_embedding(audio)
         best_name = "unknown"
         best_score = 0.0
@@ -303,9 +309,44 @@ class SpeechBrainSpeakerAuthenticator(LocalMfccSpeakerAuthenticator):
         return vector / norm if norm > 0 else vector
 
 
+class SpeakerAudioAccumulator:
+    """Buffers mono float32 user speech for text-independent speaker verification.
+
+    The future Pipecat pipeline should feed only user speech segments (VAD output),
+    never Agent TTS playback audio, into :meth:`add`. Call :meth:`collect` when
+    :meth:`has_enough` is true and pass the returned audio to
+    ``authenticator.verify_audio(...)``.
+    """
+
+    def __init__(self, config: SpeakerConfig) -> None:
+        self._config = config
+        self._chunks: list[np.ndarray] = []
+
+    def add(self, audio: np.ndarray) -> None:
+        array = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if array.size:
+            self._chunks.append(array.copy())
+
+    @property
+    def duration_seconds(self) -> float:
+        total = float(sum(chunk.size for chunk in self._chunks))
+        return total / float(self._config.sample_rate) if self._config.sample_rate else 0.0
+
+    def has_enough(self) -> bool:
+        return self.duration_seconds >= self._config.min_speech_seconds
+
+    def collect(self) -> np.ndarray | None:
+        if not self.has_enough():
+            return None
+        audio = np.concatenate(self._chunks) if self._chunks else np.empty(0, dtype=np.float32)
+        self.clear()
+        return audio
+
+    def clear(self) -> None:
+        self._chunks.clear()
+
+
 def create_speaker_authenticator(config: SpeakerConfig) -> SpeakerAuthenticator:
-    if config.backend == "mvp_passphrase":
-        return MvpPassphraseSpeakerAuthenticator(config)
     if config.backend == "speechbrain_ecapa":
         try:
             return SpeechBrainSpeakerAuthenticator(config)

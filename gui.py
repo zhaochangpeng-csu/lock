@@ -23,6 +23,7 @@ from smart_lock.results import AuthResult
 from smart_lock.sensor import create_presence_sensor
 from smart_lock.speaker_id import create_speaker_authenticator
 from smart_lock.voice_feedback import VoiceFeedback
+from smart_lock.auth_context import write_auth_context
 
 LOGGER = logging.getLogger(__name__)
 
@@ -33,7 +34,11 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         self._config = config
         self._camera = Camera(config.camera, config.system.dry_run)
         self._sensor = create_presence_sensor(config.sensor, config.system.dry_run)
-        self._lock = create_lock_actuator(config.lock, config.system.dry_run or force_lock_dry_run)
+        defer_unlock = config.lock.flow == "agent_confirm"
+        self._lock = create_lock_actuator(
+            config.lock,
+            config.system.dry_run or force_lock_dry_run or defer_unlock,
+        )
         self._fusion = FusionEngine(config.fusion)
         self._voice = VoiceFeedback(config.voice_feedback)
 
@@ -85,7 +90,7 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         self.sensor_label = QtWidgets.QLabel("1. 红外检测：等待")
         self.face_label = QtWidgets.QLabel("2. 人脸识别：待机，红外触发后开启")
         self.live_label = QtWidgets.QLabel("3. 活体检测：待机")
-        self.speaker_label = QtWidgets.QLabel("4. 口令+声纹：待机")
+        self.speaker_label = QtWidgets.QLabel("4. 声纹识别：待机")
         self.score_label = QtWidgets.QLabel("5. 融合结果：等待")
         for label in (self.sensor_label, self.face_label, self.live_label, self.speaker_label, self.score_label):
             label.setWordWrap(True)
@@ -108,10 +113,6 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         self.people_label = QtWidgets.QLabel("已注册：读取中")
         self.people_label.setWordWrap(True)
         panel_layout.addWidget(self.people_label)
-
-        self.passphrase = QtWidgets.QLineEdit()
-        self.passphrase.setPlaceholderText(f"语音口令，留空使用配置：{self._config.speaker.passphrase}")
-        panel_layout.addWidget(self.passphrase)
 
         buttons = QtWidgets.QHBoxLayout()
         self.start_btn = QtWidgets.QPushButton("启动")
@@ -216,7 +217,7 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             self._set_step("当前步骤：回到待机，仅红外检测")
             self.face_label.setText("2. 人脸识别：待机，红外触发后开启")
             self.live_label.setText("3. 活体检测：待机")
-            self.speaker_label.setText("4. 口令+声纹：待机")
+            self.speaker_label.setText("4. 声纹识别：待机")
             self.video.setText("待机中：仅红外检测，摄像头未开启")
 
     def _ensure_camera_active(self, reason: str) -> None:
@@ -296,7 +297,6 @@ class SmartLockWindow(QtWidgets.QMainWindow):
 
     def enroll_voice_sample(self) -> None:
         name = self.name_input.text().strip()
-        phrase = self._voice_phrase()
         if not name:
             self._append("声纹采集失败：请先输入姓名")
             return
@@ -305,9 +305,9 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             self._append("声纹采集失败：当前后端不支持麦克风注册")
             return
         try:
-            self._set_step(f"当前步骤：正在采集声纹，请说出口令：{phrase}")
-            self._append(f"正在录制声纹，时长 {self._config.speaker.record_seconds:.1f} 秒；请说：{phrase}")
-            self._speak("voice_prompt", f"请说出口令：{phrase}", force=True, block=True)
+            self._set_step("当前步骤：正在采集声纹，请自然说一句话")
+            self._append(f"正在录制声纹，时长 {self._config.speaker.record_seconds:.1f} 秒；请自然说一句话")
+            self._speak("voice_prompt", force=True, block=True)
             QtWidgets.QApplication.processEvents()
             save_path = speaker.enroll_microphone(name)
             sample_count = speaker.sample_count(name) if hasattr(speaker, "sample_count") else 0
@@ -373,18 +373,18 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             self._speak("liveness_pass" if live_result.passed else "liveness_fail")
             QtWidgets.QApplication.processEvents()
 
-            phrase = self._voice_phrase()
-            self._set_step(f"当前步骤：4/5 口令+声纹，请说：{phrase}")
-            self.speaker_label.setText(f"4. 口令+声纹：录音中，请说：{phrase}")
-            self._append(f"正在录制认证语音，时长 {self._config.speaker.record_seconds:.1f} 秒；请说：{phrase}")
-            self._speak("voice_prompt", f"请说出口令：{phrase}", force=True, block=True)
+            self._set_step("当前步骤：4/5 声纹识别，请自然说一句话")
+            self.speaker_label.setText("4. 声纹识别：录音中，请自然说一句话")
+            self._append(f"正在录制认证语音，时长 {self._config.speaker.record_seconds:.1f} 秒；请自然说一句话")
+            self._speak("voice_prompt", force=True, block=True)
             QtWidgets.QApplication.processEvents()
-            speaker_result = self._verify_voice_command(phrase)
+            speaker_result = self._verify_voice()
             speaker_result = self._apply_identity_consistency(face_result, speaker_result)
-            self.speaker_label.setText(self._format_result("4. 口令+声纹", speaker_result))
+            self.speaker_label.setText(self._format_result("4. 声纹识别", speaker_result))
             self._speak("voice_pass" if speaker_result.passed else "voice_fail")
 
             decision = self._fusion.decide([sensor_result, face_result, live_result, speaker_result])
+            write_auth_context(self._config.agent.safety.auth_context_path, decision)
             self._set_step("当前步骤：5/5 多模态融合判定")
             self.score_label.setText(f"5. 融合结果：{decision.score:.3f} / 阈值 {self._config.fusion.threshold:.2f}")
 
@@ -399,21 +399,11 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             self.auth_btn.setEnabled(True)
             self._maybe_enter_standby()
 
-    def _verify_voice_command(self, phrase: str) -> AuthResult:
+    def _verify_voice(self) -> AuthResult:
         speaker = self._speaker_backend()
         if hasattr(speaker, "verify_microphone"):
-            result = speaker.verify_microphone()
-        elif hasattr(speaker, "verify_phrase"):
-            result = speaker.verify_phrase(phrase)
-        else:
-            result = speaker.verify(self._config.system.dry_run)
-
-        metadata = dict(result.metadata)
-        metadata["command_phrase"] = phrase
-        reason = result.reason
-        if result.passed:
-            reason = f"{reason}; command phrase prompted"
-        return AuthResult(result.module, result.passed, result.score, reason, metadata)
+            return speaker.verify_microphone()
+        return speaker.verify(self._config.system.dry_run)
 
     @staticmethod
     def _apply_identity_consistency(face_result: AuthResult, speaker_result: AuthResult) -> AuthResult:
@@ -433,6 +423,10 @@ class SmartLockWindow(QtWidgets.QMainWindow):
 
     def _on_auth_passed(self, elapsed: float) -> None:
         self._speak("auth_pass", force=True)
+        if self._config.lock.flow == "agent_confirm":
+            self._set_step("认证通过：请说出开门指令")
+            self._append(f"认证通过，用时 {elapsed:.2f} 秒；等待语音 Agent 开门指令")
+            return
         if self.allow_unlock.isChecked():
             self._lock.unlock()
             self._set_step("认证通过：已发送开锁信号")
@@ -457,7 +451,7 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             f"红外={self._cn_pass(sensor_result.passed)}，"
             f"人脸={self._cn_pass(face_result.passed)}，"
             f"活体={self._cn_pass(live_result.passed)}，"
-            f"口令+声纹={self._cn_pass(speaker_result.passed)}"
+            f"声纹={self._cn_pass(speaker_result.passed)}"
         )
 
     def _run_motion_liveness(self) -> AuthResult:
@@ -558,9 +552,6 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         if self.voice_enabled.isChecked():
             self._voice.speak(key, text=text, force=force, block=block)
 
-    def _voice_phrase(self) -> str:
-        return self.passphrase.text().strip() or self._config.speaker.passphrase
-
     def _format_result(self, title: str, result: AuthResult) -> str:
         status = self._cn_pass(result.passed)
         reason = self._translate_reason(result.reason)
@@ -606,11 +597,8 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             "face detected but model not trained": "检测到人脸，但人脸库为空",
             "InsightFace model ready but face library is empty": "InsightFace 已就绪，但人脸库为空",
             "voice model not enrolled": "声纹库为空，请先采集声纹",
+            "not enough voice audio": "有效语音时长不足，请自然说几句话",
             "voice identity does not match face": "声纹身份与人脸身份不一致",
-            "command phrase prompted": "已提示固定口令",
-            "passphrase matched": "备用口令匹配",
-            "passphrase mismatch": "备用口令不匹配",
-            "no passphrase input": "未输入备用口令",
             "dry-run liveness accepted": "模拟模式通过",
             "motion liveness requires GUI": "需要在界面中采集连续画面",
             "liveness needs frame sequence": "需要连续画面进行活体检测",

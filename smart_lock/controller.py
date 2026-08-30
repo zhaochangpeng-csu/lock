@@ -12,6 +12,7 @@ from .lock_gpio import create_lock_actuator
 from .results import AuthResult
 from .sensor import create_presence_sensor
 from .speaker_id import create_speaker_authenticator
+from .auth_context import write_auth_context
 
 LOGGER = logging.getLogger(__name__)
 
@@ -21,7 +22,11 @@ class SmartLockController:
         self._config = config
         self._camera = Camera(config.camera, config.system.dry_run)
         self._sensor = create_presence_sensor(config.sensor, config.system.dry_run)
-        self._lock = create_lock_actuator(config.lock, config.system.dry_run or force_lock_dry_run)
+        defer_unlock = config.lock.flow == "agent_confirm"
+        self._lock = create_lock_actuator(
+            config.lock,
+            config.system.dry_run or force_lock_dry_run or defer_unlock,
+        )
         self._face = create_face_authenticator(config.face)
         self._liveness = create_liveness_checker(config.liveness)
         self._speaker = create_speaker_authenticator(config.speaker)
@@ -70,9 +75,16 @@ class SmartLockController:
             results.append(self._speaker.verify(self._config.system.dry_run))
 
         decision = self._fusion.decide(results)
+        write_auth_context(self._config.agent.safety.auth_context_path, decision)
         if decision.passed:
-            LOGGER.info("Authentication passed: fusion_score=%.3f", decision.score)
-            self._lock.unlock()
+            if self._config.lock.flow == "immediate":
+                LOGGER.info("Authentication passed: fusion_score=%.3f", decision.score)
+                self._lock.unlock()
+            else:
+                LOGGER.info(
+                    "Authentication passed; waiting for Agent unlock request: fusion_score=%.3f",
+                    decision.score,
+                )
         else:
             self._log_denied(results, decision.score)
 

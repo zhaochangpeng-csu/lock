@@ -8,10 +8,17 @@ import sounddevice as sd
 from smart_lock.config import load_config
 
 
+def _sounddevice_device(value: str) -> int | str:
+    try:
+        return int(value)
+    except ValueError:
+        return value
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Record a short microphone sample")
     parser.add_argument("--seconds", type=float, default=1.0)
-    parser.add_argument("--device", default=None)
+    parser.add_argument("--device", default=None, type=_sounddevice_device)
     args = parser.parse_args()
 
     config = load_config("config.yaml")

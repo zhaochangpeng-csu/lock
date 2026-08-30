@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .env
+.fastgpt-agent-state.json
 .venv/
 venv/
 logs/
@@ -9,3 +10,4 @@ models/
 *.tar.gz
 *.zip
 audio_prompts/*.pcm
+.workbuddy

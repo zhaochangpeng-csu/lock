@@ -1,0 +1,20 @@
+# Voice agent and tool gateway dependencies.
+# Install after the base hardware dependencies in requirements.txt.
+#
+# Pipecat on x86_64 (WSL / Windows / normal PC):
+pipecat-ai==0.0.108; platform_machine != "aarch64"
+#
+# Jetson Nano aarch64:
+# Do NOT install pipecat-ai from this file. Run:
+#   bash deploy/install_jetson_agent.sh
+funasr>=1.1
+modelscope>=1.16
+edge-tts>=6.1
+# ffmpeg fallback for development machines without system ffmpeg.
+# Jetson keeps system `apt install ffmpeg` as the primary path.
+imageio-ffmpeg>=0.6
+fastapi>=0.110
+uvicorn>=0.27
+requests
+soundfile
+sounddevice>=0.4

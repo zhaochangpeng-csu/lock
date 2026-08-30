@@ -1,0 +1,28 @@
+# Pipecat runtime dependencies for Jetson Nano (Linux aarch64, Python 3.10).
+# Verified with pip download --only-binary=:all: --platform manylinux2014_aarch64.
+#
+# pipecat-ai==0.0.108 itself is installed by deploy/install_jetson_agent.sh
+# with --no-deps because its upstream constraints are not available on aarch64:
+#   numba>=0.61.2      -> aarch64 has 0.60.0
+#   onnxruntime~=1.23  -> aarch64 has 1.16.3
+#   soxr~=1.0.0        -> aarch64 has 0.5.0.post1
+# The full file-pipeline E2E passed in WSL with exactly these substitutions.
+aiofiles>=24.1.0,<27
+aiohttp>=3.11.12,<4
+docstring_parser>=0.16,<1
+loguru~=0.7.3
+Markdown>=3.7,<4
+nltk>=3.9.4,<4
+numpy>=1.26.4,<2
+Pillow>=11.1.0,<13
+protobuf>=6.31.1,<7
+pydantic>=2.10.6,<3
+pyloudnorm~=0.2.0
+resampy~=0.4.3
+soxr==0.5.0.post1
+openai>=1.74.0,<3
+numba==0.60.0
+wait_for2>=0.4.1,<1
+transformers>=4.48.0,<6
+onnxruntime==1.16.3
+imageio-ffmpeg>=0.6
