@@ -155,8 +155,73 @@ class SoundDeviceInputTransport(BaseInputTransport):
         )
 
 
+class AplayOutputTransport(BaseOutputTransport):
+    """Pipecat output transport using the Jetson's verified ALSA aplay path."""
+
+    def __init__(self, *, sample_rate: int, device: str, **kwargs) -> None:
+        params = TransportParams(
+            audio_out_enabled=True,
+            audio_out_sample_rate=sample_rate,
+            audio_out_channels=1,
+        )
+        super().__init__(params, **kwargs)
+        self._device = device
+        self._process = None
+
+    async def start(self, frame: StartFrame):
+        await super().start(frame)
+        if self._process is not None:
+            return
+        if not shutil.which("aplay"):
+            raise RuntimeError("aplay is required for Jetson voice output")
+        self._process = await asyncio.create_subprocess_exec(
+            "aplay",
+            "-q",
+            "-D",
+            self._device,
+            "-t",
+            "raw",
+            "-f",
+            "S16_LE",
+            "-r",
+            str(self._sample_rate),
+            "-c",
+            "1",
+            stdin=asyncio.subprocess.PIPE,
+        )
+        await self.set_transport_ready(frame)
+        LOGGER.info("ALSA aplay output started: device=%s rate=%s", self._device, self._sample_rate)
+
+    async def cleanup(self):
+        if self._process is not None:
+            if self._process.stdin is not None:
+                self._process.stdin.close()
+                try:
+                    await self._process.stdin.wait_closed()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                self._process.terminate()
+                await self._process.wait()
+            self._process = None
+        await super().cleanup()
+
+    async def write_audio_frame(self, frame: OutputAudioRawFrame) -> bool:
+        if self._process is None or self._process.stdin is None:
+            return False
+        try:
+            self._process.stdin.write(frame.audio)
+            await self._process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            LOGGER.exception("ALSA aplay output stopped unexpectedly")
+            return False
+        return True
+
+
 class SoundDeviceOutputTransport(BaseOutputTransport):
-    """Pipecat output transport backed by sounddevice/PortAudio."""
+    """Non-Linux output transport used for Windows development checks."""
 
     def __init__(self, *, sample_rate: int, device: int | str | None = None, **kwargs) -> None:
         params = TransportParams(
@@ -183,7 +248,6 @@ class SoundDeviceOutputTransport(BaseOutputTransport):
         )
         self._out_stream.start()
         await self.set_transport_ready(frame)
-        LOGGER.info("SoundDevice output started: device=%s rate=%s", self._device, self._sample_rate)
 
     async def cleanup(self):
         if self._out_stream is not None:
@@ -810,7 +874,7 @@ async def run_realtime_pipeline(
     output_device: int | str | None = None,
     chat_id: str,
     sample_rate: int = 16000,
-    output_sample_rate: int = 44100,
+    output_sample_rate: int = 16000,
     transcriber: FunASRTranscriber | None = None,
 ) -> None:
     if input_device is None:
@@ -826,9 +890,16 @@ async def run_realtime_pipeline(
     input_transport = SoundDeviceInputTransport(
         sample_rate=sample_rate, device=input_device, vad_analyzer=vad
     )
-    output_transport = SoundDeviceOutputTransport(
-        sample_rate=output_sample_rate, device=output_device
-    )
+    if sys.platform.startswith("linux"):
+        output_transport = AplayOutputTransport(
+            sample_rate=output_sample_rate,
+            device=str(output_device or config.voice_feedback.pcm_device),
+        )
+    else:
+        output_transport = SoundDeviceOutputTransport(
+            sample_rate=output_sample_rate,
+            device=output_device,
+        )
     pipeline = build_pipeline(
         config,
         input_transport=input_transport,
@@ -949,7 +1020,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--output-device", default=None, type=_sounddevice_device,
-        help="sounddevice output device index or name (real-time mode)",
+        help="ALSA device on Jetson or sounddevice output on Windows (real-time mode)",
     )
     parser.add_argument("--input-wav", default=None, help="Test with a 16 kHz mono WAV input")
     parser.add_argument("--output-wav", default=None, help="Write generated TTS to this WAV")

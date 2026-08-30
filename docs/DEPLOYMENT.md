@@ -26,7 +26,7 @@ Local TTS decision (2026-08-30):
 - `piper-tts` direct installation is NOT viable for Jetson aarch64: `piper-phonemize` has no aarch64 wheel in the available index.
 - `sherpa-onnx 1.13.6` has a Python 3.8 aarch64 manylinux wheel and supports offline VITS/Piper voices. It is the chosen local TTS runtime.
 - WSL smoke test passed: `vits-piper-zh_CN-xiao_ya-medium-int8` (13.4 MB) synthesized a valid 2.72 s Chinese WAV with non-zero audio. The model card says that voice is non-commercial, so it is a smoke-test voice only; select the final voice after checking its license.
-- Remaining work: wire sherpa-onnx VITS into Pipecat and benchmark on the real Jetson; EdgeTTS remains the current online TTS.
+- Pipecat now prefers local sherpa-onnx VITS and falls back to EdgeTTS, then espeak. The final voice still needs a license review and a physical-board latency benchmark.
 
 Validated Pipecat prototype in WSL and Windows (2026-08-30):
 
@@ -77,7 +77,7 @@ Replace device `1` with an input-capable index reported by `sounddevice`. On thi
 On Jetson, the audio protocol is:
 
 - Input: `sounddevice -> PortAudio -> PulseAudio default source`, XFM-DP microphone, mono 16 kHz.
-- Pipecat TTS: EdgeTTS MP3 -> `ffmpeg` direct 44.1 kHz mono S16LE -> `sounddevice` default sink; no second resampling step.
+- Pipecat TTS: local sherpa-onnx first, then EdgeTTS/espeak fallback -> 16 kHz mono S16LE -> ALSA `aplay` using `voice_feedback.pcm_device`.
 - GUI prompts: original `aplay` PCM path with `voice_feedback.pcm_device`, rate, format, and channels remains unchanged.
 - `voice_agent.py` remains the fixed-duration fallback entry point.
 
@@ -168,9 +168,12 @@ DISPLAY=:0 ./run_smart_lock.sh
 
 `run_smart_lock.sh` is idempotent and supervised:
 - starts/restarts `lock_tool_gateway.py`;
+- starts/restarts `lock_event_service.py` on the configurable local event port;
 - starts `voice_agent_pipecat.py --wait-auth`, which preloads FunASR and waits for a fresh hardware credential before opening the microphone;
 - starts `gui.py --hardware --no-unlock`; the GUI preloads face/liveness/speaker models when `启动` is clicked;
 - clears stale `auth_context.json` on startup.
+
+An authentication failure in either `gui.py` or `SmartLockController` reports one `abnormal_behavior` event to the local event service. The report is a non-authoritative side effect: failure to report cannot stop or change hardware authentication. `latest_event.json` intentionally stores only the newest event for the first WorkBuddy integration.
 
 Start the Jetson tool gateway:
 

@@ -220,6 +220,16 @@ class AgentSafetyConfig:
 
 
 @dataclass(frozen=True)
+class EventReportingConfig:
+    enabled: bool = True
+    service_url: str = "http://127.0.0.1:8790"
+    service_url_env: str = "LOCK_EVENT_SERVICE_URL"
+    token_env: str = "LOCK_EVENT_SERVICE_TOKEN"
+    timeout_seconds: float = 0.8
+    unknown_face_delay_seconds: float = 3.0
+
+
+@dataclass(frozen=True)
 class AgentConfig:
     system_prompt: str = (
         "You are a smart-lock voice agent at a door. Keep replies short and suitable for voice. "
@@ -247,6 +257,7 @@ class AppConfig:
     voice_feedback: VoiceFeedbackConfig
     fusion: FusionConfig
     agent: AgentConfig
+    event_reporting: EventReportingConfig = field(default_factory=EventReportingConfig)
 
 
 def load_config(path: Union[str, Path]) -> AppConfig:
@@ -275,6 +286,18 @@ def load_config(path: Union[str, Path]) -> AppConfig:
     agent_raw["safety"] = AgentSafetyConfig(**agent_safety_raw)
     agent_config = AgentConfig(**agent_raw)
     agent_config = _apply_agent_env_overrides(agent_config)
+    event_reporting_raw = dict(raw.get("event_reporting", {}) or {})
+    event_reporting = EventReportingConfig(**event_reporting_raw)
+    event_service_url = os.getenv(event_reporting.service_url_env)
+    if event_service_url:
+        event_reporting = EventReportingConfig(
+            enabled=event_reporting.enabled,
+            service_url=event_service_url,
+            service_url_env=event_reporting.service_url_env,
+            token_env=event_reporting.token_env,
+            timeout_seconds=event_reporting.timeout_seconds,
+            unknown_face_delay_seconds=event_reporting.unknown_face_delay_seconds,
+        )
 
     return AppConfig(
         system=SystemConfig(**raw["system"]),
@@ -288,6 +311,7 @@ def load_config(path: Union[str, Path]) -> AppConfig:
         voice_feedback=VoiceFeedbackConfig(**voice_raw),
         fusion=FusionConfig(**raw["fusion"]),
         agent=agent_config,
+        event_reporting=event_reporting,
     )
 
 

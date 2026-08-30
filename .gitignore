@@ -1,6 +1,8 @@
 __pycache__/
 *.py[cod]
 .env
+latest_event.json
+latest_event.json.tmp
 .fastgpt-agent-state.json
 .venv/
 venv/

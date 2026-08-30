@@ -28,6 +28,12 @@ def main() -> int:
     gateway.add_argument("--token", default="lifecycle-test-token")
     gateway.add_argument("--python", default=sys.executable)
 
+    event = subparsers.add_parser("event", help="Test event service start/restart/stop")
+    event.add_argument("--host", default="127.0.0.1")
+    event.add_argument("--port", type=int, default=9879)
+    event.add_argument("--token", default="event-lifecycle-test-token")
+    event.add_argument("--python", default=sys.executable)
+
     fastgpt = subparsers.add_parser("fastgpt", help="Check or test FastGPT compose lifecycle")
     fastgpt.add_argument("--compose-dir", default="/mnt/c/users/hoyo/desktop/fastgpt-smart-lock")
     fastgpt.add_argument("--health-url", help="Defaults to FASTGPT_FE_DOMAIN or FASTGPT_HTTP_PORT in compose .env")
@@ -38,6 +44,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "gateway":
         return test_gateway(args)
+    if args.command == "event":
+        return test_event_service(args)
     if args.command == "fastgpt":
         return test_fastgpt(args)
     return 2
@@ -125,6 +133,73 @@ def test_gateway(args: argparse.Namespace) -> int:
     print("env ok: parent process unchanged")
     return 0
 
+
+def test_event_service(args: argparse.Namespace) -> int:
+    connect_host = "127.0.0.1" if args.host in {"0.0.0.0", "::"} else args.host
+    if is_port_open(connect_host, args.port):
+        print(f"FAIL port already in use before start: {connect_host}:{args.port}")
+        return 2
+
+    with tempfile.TemporaryDirectory(prefix="smart-lock-event-test-") as tmpdir:
+        event_path = Path(tmpdir) / "latest_event.json"
+        env = os.environ.copy()
+        env.update(
+            {
+                "LOCK_EVENT_PATH": str(event_path),
+                "LOCK_EVENT_SERVICE_TOKEN": args.token,
+            }
+        )
+        proc = start_event_service(args.python, args.host, args.port, env)
+        try:
+            health_url = f"http://{connect_host}:{args.port}/health"
+            event_url = f"http://{connect_host}:{args.port}/event"
+            wait_http(health_url, expected_status=200)
+            expect_http_status(event_url, 401)
+            recorded = post_json(
+                event_url,
+                {
+                    "event_type": "abnormal_behavior",
+                    "identity": "unknown",
+                    "confidence": 0.31,
+                    "details": {"reason": "lifecycle_test"},
+                },
+                token=args.token,
+            )
+            if not event_path.exists() or not recorded.get("event"):
+                print("FAIL event was not recorded")
+                return 3
+            print(f"start ok: {health_url}")
+
+            stop_process(proc)
+            wait_port_closed(connect_host, args.port)
+            print("stop ok: port released")
+
+            proc = start_event_service(args.python, args.host, args.port, env)
+            wait_http(health_url, expected_status=200)
+            print("restart ok: service came back")
+
+            proc.kill()
+            proc.wait(timeout=10)
+            wait_port_closed(connect_host, args.port)
+            print("crash stop ok: port released")
+
+            proc = start_event_service(args.python, args.host, args.port, env)
+            wait_http(health_url, expected_status=200)
+            print("post-crash restart ok: service came back")
+
+            stop_process(proc)
+            wait_port_closed(connect_host, args.port)
+            print("final stop ok: port released")
+        finally:
+            if proc.poll() is None:
+                stop_process(proc)
+            if is_port_open(connect_host, args.port):
+                print(f"FAIL port still open after cleanup: {connect_host}:{args.port}")
+                return 4
+
+    print("env ok: parent process unchanged")
+    return 0
+
 def test_fastgpt(args: argparse.Namespace) -> int:
     compose_dir = Path(args.compose_dir)
     if not (compose_dir / "docker-compose.yml").exists():
@@ -208,6 +283,30 @@ def start_gateway(
             str(ROOT / "lock_tool_gateway.py"),
             "--config",
             config,
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ],
+        cwd=ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def start_event_service(
+    python: str,
+    host: str,
+    port: int,
+    env: dict[str, str],
+) -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        [
+            python,
+            str(ROOT / "lock_event_service.py"),
+            "serve",
             "--host",
             host,
             "--port",

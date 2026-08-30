@@ -17,6 +17,7 @@
 - `aplay` PCM 语音引导
 - PySide6 图形界面
 - FastGPT 语音 Agent 与本地受控工具网关
+- 认证失败自动写入单条 `latest_event.json`
 - 继电器开锁接口
 
 调试版本默认使用 `--no-unlock`，不会真正驱动继电器开锁。
@@ -40,6 +41,7 @@ cd ~/smart_lock_ai_20260829_1915
 该脚本会：
 
 - 启动本地工具网关并自动拉起；
+- 启动仅监听本机 `127.0.0.1:8790` 的异常事件服务；
 - 预加载 FunASR，并让 Pipecat 语音 Agent 等待硬件认证凭证；
 - 启动 GUI（点击“启动”后会预加载人脸/活体/声纹模型）；
 - 自动监督网关、Agent、GUI 进程。
@@ -171,7 +173,7 @@ $py = "$env:USERPROFILE\miniconda3\envs\py3.10\python.exe"
 python3 voice_agent_pipecat.py --wait-auth
 ```
 
-原型能力：Silero VAD 分段、用户说话时打断、FunASR 转写、FastGPT 流式回复、EdgeTTS 合成、sounddevice 输入输出。回声消除和长时间稳定性仍待现场持续验证。
+原型能力：Silero VAD 分段、用户说话时打断、FunASR 转写、FastGPT 流式回复、本地 sherpa-onnx 优先的 TTS。Jetson 输入走 `sounddevice/PortAudio`，输出走 16 kHz 单声道 `aplay`；Windows 开发检查仍使用 `sounddevice` 输出。回声消除和长时间稳定性仍待现场持续验证。
 
 ### 8.2 单轮降级入口
 
@@ -204,7 +206,20 @@ python3 voice_agent.py --text "你好，请开门" --require-fastgpt
 - 凭证被消费后立即失效；过期或人离开后失效。
 - 没有有效凭证时，Agent 只能拒绝开门、引导重新认证或通知业主。
 
-## 9. 语音引导
+## 9. 异常事件
+
+GUI 或无界面控制器完成融合判定后，只要认证失败，就会旁路调用本机异常服务并原子写入 `latest_event.json`。GUI 中红外持续有人且超过 `unknown_face_delay_seconds` 仍无法识别人脸，也会自动写入；同一次人员停留只写一次，离开后重新布防。事件服务不可用只会记录警告，不会改变硬件认证、凭证签发或开锁流程。
+
+```yaml
+event_reporting:
+  enabled: true
+  service_url: "http://127.0.0.1:8790"
+  unknown_face_delay_seconds: 3.0
+```
+
+可用 `LOCK_EVENT_SERVICE_URL`、`LOCK_EVENT_SERVICE_HOST`、`LOCK_EVENT_SERVICE_PORT` 和 `LOCK_EVENT_SERVICE_TOKEN` 覆盖地址与鉴权。当前是“只保留最新一条”的简化实现；新失败会覆盖上一条，因此不等同于完整事件队列。
+
+## 10. 语音引导
 
 程序会优先播放 `audio_prompts/` 下的原始 PCM 文件：
 
@@ -241,7 +256,7 @@ audio_prompts/auth_fail.pcm
 
 如果某个 PCM 文件不存在，程序不会报错退出，会尝试 `spd-say`/`espeak`，再不行就只写日志。
 
-## 10. 主要配置
+## 11. 主要配置
 
 配置文件：`config.yaml`
 
@@ -295,7 +310,7 @@ fusion:
     sensor: 0.10
 ```
 
-## 11. 单独测试硬件
+## 12. 单独测试硬件
 
 测试红外传感器：
 
@@ -336,7 +351,7 @@ speaker_backend=SpeechBrainSpeakerAuthenticator
 speaker_model=ready
 ```
 
-## 12. 真实开锁
+## 13. 真实开锁
 
 调试阶段保持：
 

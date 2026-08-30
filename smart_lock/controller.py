@@ -13,6 +13,7 @@ from .results import AuthResult
 from .sensor import create_presence_sensor
 from .speaker_id import create_speaker_authenticator
 from .auth_context import write_auth_context
+from .event_reporting import report_auth_failure
 
 LOGGER = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ class SmartLockController:
             LOGGER.exception("Camera capture failed")
             results.append(AuthResult("face", False, 0.0, f"camera failed: {exc}"))
             self._log_denied(results, 0.0)
+            report_auth_failure(self._config.event_reporting, 0.0, results)
             return
 
         if self._config.face.enabled:
@@ -87,6 +89,7 @@ class SmartLockController:
                 )
         else:
             self._log_denied(results, decision.score)
+            report_auth_failure(self._config.event_reporting, decision.score, results)
 
     def _time_left(self, started_at: float) -> bool:
         elapsed = time.monotonic() - started_at

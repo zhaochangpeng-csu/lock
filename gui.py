@@ -25,6 +25,7 @@ from smart_lock.sensor import create_presence_sensor
 from smart_lock.speaker_id import create_speaker_authenticator
 from smart_lock.voice_feedback import VoiceFeedback
 from smart_lock.auth_context import read_auth_context, write_auth_context
+from smart_lock.event_reporting import report_auth_failure
 
 LOGGER = logging.getLogger(__name__)
 
@@ -64,6 +65,9 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         self._last_agent_status = ""
         self._agent_running = False
         self._presence_lost_at = None
+        self._unknown_face_since: float | None = None
+        self._event_reported_for_presence = False
+        self._last_event_report_attempt_at = 0.0
 
         self.setWindowTitle("Jetson 智能门锁 MVP")
         self.resize(1120, 720)
@@ -212,6 +216,9 @@ class SmartLockWindow(QtWidgets.QMainWindow):
                     self._presence_lost_at = now
                 elif now - self._presence_lost_at >= self._config.auto_auth.absence_rearm_seconds:
                     self._auto_auth_paused_until = 0.0
+                    self._unknown_face_since = None
+                    self._event_reported_for_presence = False
+                    self._last_event_report_attempt_at = 0.0
                 self._maybe_enter_standby()
         except Exception as exc:
             self.sensor_label.setText(f"1. 红外检测：异常，{exc}")
@@ -233,6 +240,7 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             self._last_face = result
             self.face_label.setText(self._format_result("2. 人脸识别", self._last_face))
             self._show_frame(self._draw_face(frame.copy(), self._last_face))
+            self._maybe_report_unknown_face(result, now)
             self._maybe_auto_authenticate()
         except Exception as exc:
             self.video.setText(f"摄像头异常：{exc}")
@@ -243,6 +251,9 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         self._last_presence_at = now
         self._presence_lost_at = None
         if rising_edge:
+            self._unknown_face_since = None
+            self._event_reported_for_presence = False
+            self._last_event_report_attempt_at = 0.0
             self._append("红外检测到有人靠近，开启摄像头和人脸识别")
             self._ensure_camera_active("红外检测到有人靠近")
             self._speak("presence", force=True)
@@ -317,6 +328,29 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         self._append(f"自动认证触发：红外通过，人脸通过，身份={identity}")
         self._speak("auto_start")
         QtCore.QTimer.singleShot(self._config.auto_auth.auto_start_delay_ms, self.authenticate_once)
+
+    def _maybe_report_unknown_face(self, face_result: AuthResult, now: float) -> None:
+        if not self._last_sensor or face_result.passed or self._event_reported_for_presence:
+            self._unknown_face_since = None
+            return
+        if self._unknown_face_since is None:
+            self._unknown_face_since = now
+            return
+        if now - self._unknown_face_since < self._config.event_reporting.unknown_face_delay_seconds:
+            return
+        sensor_result = AuthResult("sensor", True, 1.0, "presence detected")
+        decision = self._fusion.decide([sensor_result, face_result])
+        self._report_auth_failure_once(decision.score, [sensor_result, face_result])
+
+    def _report_auth_failure_once(self, score: float, results: list[AuthResult]) -> None:
+        if self._event_reported_for_presence:
+            return
+        now = time.monotonic()
+        if now - self._last_event_report_attempt_at < 5.0:
+            return
+        self._last_event_report_attempt_at = now
+        if report_auth_failure(self._config.event_reporting, score, results):
+            self._event_reported_for_presence = True
 
     def capture_face_sample(self) -> None:
         name = self.name_input.text().strip()
@@ -534,6 +568,9 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             f"人脸={self._cn_pass(face_result.passed)}，"
             f"活体={self._cn_pass(live_result.passed)}，"
             f"声纹={self._cn_pass(speaker_result.passed)}"
+        )
+        self._report_auth_failure_once(
+            score, [sensor_result, face_result, live_result, speaker_result]
         )
 
     def _run_motion_liveness(self) -> AuthResult:

@@ -158,6 +158,13 @@ fusion:
     liveness: 0.25
     speaker: 0.20
     sensor: 0.10
+event_reporting:
+  enabled: true
+  service_url: "http://127.0.0.1:8790"
+  service_url_env: "LOCK_EVENT_SERVICE_URL"
+  token_env: "LOCK_EVENT_SERVICE_TOKEN"
+  timeout_seconds: 0.8
+  unknown_face_delay_seconds: 3.0
 agent:
   system_prompt: >-
     You are a smart-lock voice agent at a door. Always answer in one short Chinese sentence.
