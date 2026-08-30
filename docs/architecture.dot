@@ -1,0 +1,79 @@
+digraph SmartLockArchitecture {
+  graph [
+    rankdir=TB,
+    bgcolor="white",
+    pad="0.25",
+    nodesep="0.3",
+    ranksep="0.5",
+    fontname="Droid Sans Fallback",
+    label="智能门锁 + 语音 Agent 当前部署架构",
+    labelloc="t",
+    fontsize=22
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="Droid Sans Fallback",
+    fontsize=12,
+    margin="0.14,0.09",
+    color="#64748b",
+    fillcolor="#ffffff"
+  ];
+  edge [fontname="Droid Sans Fallback", fontsize=10, color="#475569", arrowsize=0.75];
+
+  subgraph cluster_jetson {
+    label="Jetson 边缘端（硬件、实时语音、最终安全执行）";
+    color="#0f766e";
+    fillcolor="#ecfdf5";
+    style="rounded,filled";
+    penwidth=1.5;
+
+    sensor [label="串口红外\n人体接近触发", fillcolor="#d1fae5"];
+    camera [label="RGB 摄像头\nInsightFace 人脸", fillcolor="#d1fae5"];
+    liveness [label="MediaPipe\n眨眼 + 转头活体", fillcolor="#d1fae5"];
+    speaker [label="SpeechBrain ECAPA\n文本无关声纹", fillcolor="#d1fae5"];
+    fusion [label="本地融合判定\n阈值 0.78", fillcolor="#a7f3d0", penwidth=1.4];
+    credential [label="一次性认证凭证\n300 秒 / consumed", fillcolor="#fef3c7", color="#b45309"];
+
+    mic [label="麦克风输入\nsounddevice / PortAudio", fillcolor="#e0f2fe", color="#0369a1"];
+    pipecat [label="Pipecat\nVAD / 轮流说话 / 打断", fillcolor="#bae6fd", color="#0369a1"];
+    asr [label="本地 ASR\nSenseVoice / FunASR", fillcolor="#e0f2fe", color="#0369a1"];
+    tts [label="本地 TTS 优先\nsherpa-onnx", fillcolor="#e0f2fe", color="#0369a1"];
+    aplay [label="ALSA aplay\n16 kHz / S16_LE / 单声道", fillcolor="#e0f2fe", color="#0369a1"];
+
+    gateway [label="工具网关 :8787\nBearer 鉴权 + 本地安全闸门", fillcolor="#fee2e2", color="#b91c1c", penwidth=1.4];
+    actuator [label="风扇串口模拟开锁\n未来 GPIO 继电器", fillcolor="#fecaca", color="#b91c1c"];
+    event [label="异常服务 :8790\nlatest_event.json", fillcolor="#fef3c7", color="#b45309"];
+
+    {rank=same; sensor; camera; liveness; speaker;}
+    sensor -> fusion;
+    camera -> fusion;
+    liveness -> fusion;
+    speaker -> fusion;
+    fusion -> credential [label="通过"];
+    fusion -> event [label="失败旁路上报", color="#b45309"];
+
+    mic -> pipecat -> asr;
+    tts -> pipecat -> aplay;
+    credential -> gateway [label="读取 / 消费"];
+    gateway -> actuator [label="allowed=true"];
+  }
+
+  subgraph cluster_pc {
+    label="Windows / WSL（Agent 与管理）";
+    color="#1d4ed8";
+    fillcolor="#eff6ff";
+    style="rounded,filled";
+    penwidth=1.5;
+
+    fastgpt [label="FastGPT :3300\nAgent 工作流与工具编排", fillcolor="#dbeafe", color="#1d4ed8"];
+    deepseek [label="DeepSeek API\n意图理解与短句回复", fillcolor="#dbeafe", color="#1d4ed8"];
+    workbuddy [label="WorkBuddy 定时任务\n同步、分析、Bot 通知", fillcolor="#fef3c7", color="#b45309"];
+    fastgpt -> deepseek [label="模型调用"];
+  }
+
+  asr -> fastgpt [label="SSH 反向隧道 / HTTP", color="#1d4ed8"];
+  fastgpt -> tts [label="简短中文回复", color="#1d4ed8"];
+  fastgpt -> gateway [label="current_auth_context\nrequest_unlock", color="#b91c1c", penwidth=1.4];
+  event -> workbuddy [label="SCP 同步（计划定时）", color="#b45309", style=dashed];
+}

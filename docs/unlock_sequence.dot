@@ -1,0 +1,44 @@
+digraph UnlockSequence {
+  graph [
+    rankdir=TB,
+    bgcolor="white",
+    pad="0.25",
+    nodesep="0.25",
+    ranksep="0.4",
+    fontname="Droid Sans Fallback",
+    label="两阶段受控开门流程",
+    labelloc="t",
+    fontsize=22
+  ];
+  node [shape=box, style="rounded,filled", fontname="Droid Sans Fallback", fontsize=12, margin="0.14,0.1"];
+  edge [fontname="Droid Sans Fallback", fontsize=10, arrowsize=0.75];
+
+  approach [label="人员靠近", fillcolor="#d1fae5", color="#0f766e"];
+  auth [label="红外 + 人脸 + 活体 + 声纹", fillcolor="#d1fae5", color="#0f766e"];
+  fusion [label="本地融合判定", fillcolor="#a7f3d0", color="#0f766e", penwidth=1.5];
+  event [label="失败：写异常事件\n不影响原硬件链路", fillcolor="#fef3c7", color="#b45309"];
+  credential [label="通过：签发一次性凭证", fillcolor="#fef3c7", color="#b45309"];
+  speak [label="用户说“开门”", fillcolor="#dbeafe", color="#1d4ed8"];
+  agent [label="FastGPT / DeepSeek\n理解开门意图", fillcolor="#dbeafe", color="#1d4ed8"];
+  context [label="current_auth_context", fillcolor="#fee2e2", color="#b91c1c"];
+  request [label="request_unlock(reason)", fillcolor="#fee2e2", color="#b91c1c"];
+  gate [label="Jetson 安全闸门\n有效 + 新鲜 + 未消费\n且非 no-unlock", fillcolor="#fecaca", color="#b91c1c", penwidth=1.5];
+  unlock [label="消费凭证并执行动作", fillcolor="#fecaca", color="#b91c1c"];
+  refuse [label="拒绝开门", fillcolor="#e5e7eb", color="#475569"];
+
+  {rank=same; approach; auth; fusion; credential; event;}
+  {rank=same; speak; agent; context; request;}
+  {rank=same; gate; unlock; refuse;}
+
+  approach -> auth -> fusion;
+  fusion -> event [label="失败", color="#b45309"];
+  fusion -> credential [label="通过", color="#0f766e"];
+  credential -> speak -> agent -> context;
+  context -> request [label="凭证可用"];
+  context -> refuse [label="不可用", color="#475569"];
+  request -> gate;
+  gate -> unlock [label="允许", color="#b91c1c"];
+  gate -> refuse [label="拒绝", color="#475569"];
+
+  event -> speak [style=invis];
+}
