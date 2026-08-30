@@ -11,6 +11,7 @@ import numpy as np
 
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     Frame,
     InputAudioRawFrame,
     StartFrame,
@@ -91,13 +92,26 @@ def test_turn_collector() -> None:
     assert count == 1
 
 
-def test_interruption_signal() -> None:
+def test_ignore_vad_while_bot_speaking() -> None:
     logger.disable("pipecat")
     async def scenario() -> None:
         collector = TurnAudioCollector(sample_rate=16000, min_turn_seconds=0.1, pre_roll_seconds=0.1)
         await collector.process_frame(BotStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
         await collector.process_frame(VADUserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
-        assert collector.interruption_count == 1
+        assert collector.turn_count == 0
+        await collector.process_frame(BotStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+        collector._vad_resume_at = 0.0
+        await collector.process_frame(
+            InputAudioRawFrame(audio=b"\x01\x00" * 3200, sample_rate=16000, num_channels=1),
+            FrameDirection.DOWNSTREAM,
+        )
+        await collector.process_frame(VADUserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+        await collector.process_frame(
+            InputAudioRawFrame(audio=b"\x01\x00" * 3200, sample_rate=16000, num_channels=1),
+            FrameDirection.DOWNSTREAM,
+        )
+        await collector.process_frame(VADUserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+        assert collector.turn_count == 1
 
     asyncio.run(scenario())
     logger.enable("pipecat")
@@ -166,7 +180,7 @@ if __name__ == "__main__":
     test_int16_output_conversion()
     test_audio_helpers()
     test_turn_collector()
-    test_interruption_signal()
+    test_ignore_vad_while_bot_speaking()
     test_wait_for_fresh_auth_context()
     test_e2e_file_pipeline()
     print("voice_agent_pipecat tests passed")

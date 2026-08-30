@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from smart_lock.config import load_config
 from smart_lock.auth_context import consume_auth_context, read_auth_context
-from smart_lock.lock_gpio import JetsonRelayLockActuator
+from smart_lock.lock_gpio import create_lock_actuator
 
 
 class QueryWhitelistRequest(BaseModel):
@@ -137,7 +137,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
     token = os.getenv(config.agent.tool_gateway.token_env, "")
     app = FastAPI(title="Smart Lock Tool Gateway")
     unlock_lock = threading.Lock()
-    actuator: JetsonRelayLockActuator | None = None
+    actuator = None
 
     def require_token(authorization: str = Header(default="")) -> None:
         if not token:
@@ -206,7 +206,7 @@ def create_app(config_path: str = "config.yaml") -> FastAPI:
             if allowed:
                 credential_id = str(context["credential_id"])
                 if actuator is None:
-                    actuator = JetsonRelayLockActuator(config.lock)
+                    actuator = create_lock_actuator(config.lock, dry_run=False)
                 if not consume_auth_context(config.agent.safety.auth_context_path, credential_id):
                     allowed = False
                 else:

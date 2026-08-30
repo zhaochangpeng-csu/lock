@@ -78,7 +78,8 @@ start_gui_once() {
   if is_running "$GUI_PID"; then
     return 0
   fi
-  nohup env DISPLAY="$DISPLAY" python3 -B gui.py --hardware --no-unlock \
+  nohup env DISPLAY="$DISPLAY" SMART_LOCK_AUTO_START=1 \
+    python3 -B gui.py --hardware --no-unlock \
     > "$LOG_DIR/gui.log" 2>&1 &
   echo $! > "$GUI_PID"
   echo "gui started pid=$(cat "$GUI_PID")"
@@ -107,10 +108,12 @@ supervise_agent() {
 supervise_gui() {
   while true; do
     if [ -n "${DISPLAY:-}" ] && ! is_running "$GUI_PID"; then
-      echo "$(date '+%F %T') gui down, restarting" >> "$LOG_DIR/supervisor.log"
+      echo "$(date '+%F %T') gui down; resetting agent and credential" >> "$LOG_DIR/supervisor.log"
+      stop_one agent "$AGENT_PID" || true
+      rm -f "$AUTH_CONTEXT"
       start_gui_once
     fi
-    sleep 10
+    sleep 5
   done
 }
 
@@ -126,6 +129,15 @@ trap cleanup EXIT INT TERM
 if [ "${1:-}" = "--stop" ]; then
   cleanup
   exit 0
+fi
+
+# Prefer the verified XFM-DP microphone and USB speaker after reboots.
+if command -v pactl >/dev/null 2>&1; then
+  XFM_SRC=$(pactl list short sources 2>/dev/null | grep "XFM-DP" | head -1 | awk '{print $1}')
+  [ -n "$XFM_SRC" ] && pactl set-default-source "$XFM_SRC"
+  USB_SINK=$(pactl list short sinks 2>/dev/null | grep -iE "usb.*(audio|c-media)" | head -1 | awk '{print $1}')
+  [ -n "$USB_SINK" ] && pactl set-default-sink "$USB_SINK"
+  pactl set-sink-volume @DEFAULT_SINK@ 90% 2>/dev/null || true
 fi
 
 # Idempotent startup: never start duplicate processes.

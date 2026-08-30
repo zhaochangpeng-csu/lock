@@ -50,6 +50,7 @@ VAD_STOP_SECS = 1.3
 VAD_MIN_TURN_SECONDS = 0.5
 VAD_CONFIDENCE = 0.4
 VAD_MIN_VOLUME = 0.02
+VAD_POST_BOT_GRACE_SECONDS = 1.5
 
 
 @dataclass
@@ -334,6 +335,7 @@ class TurnAudioCollector(FrameProcessor):
         self._pre_roll_bytes = int(sample_rate * pre_roll_seconds) * 2
         self._speaking = False
         self._bot_speaking = False
+        self._vad_resume_at = 0.0
         self._buffer = bytearray()
         self._pre_roll = bytearray()
         self.turn_count = 0
@@ -345,15 +347,21 @@ class TurnAudioCollector(FrameProcessor):
 
         if isinstance(frame, BotStartedSpeakingFrame):
             self._bot_speaking = True
+            self._speaking = False
+            self._buffer.clear()
             await self.push_frame(frame, direction)
             return
 
         if isinstance(frame, BotStoppedSpeakingFrame):
             self._bot_speaking = False
+            self._vad_resume_at = time.monotonic() + VAD_POST_BOT_GRACE_SECONDS
             await self.push_frame(frame, direction)
             return
 
         if isinstance(frame, (VADUserStartedSpeakingFrame, UserStartedSpeakingFrame)):
+            if self._bot_speaking or time.monotonic() < self._vad_resume_at:
+                LOGGER.debug("Ignoring VAD while bot is speaking or in grace period")
+                return
             LOGGER.debug("VAD user turn start")
             self._speaking = True
             self._buffer.clear()
@@ -385,6 +393,8 @@ class TurnAudioCollector(FrameProcessor):
             return
 
         if isinstance(frame, InputAudioRawFrame):
+            if self._bot_speaking or time.monotonic() < self._vad_resume_at:
+                return
             self._pre_roll.extend(frame.audio)
             overflow = len(self._pre_roll) - self._pre_roll_bytes
             if overflow > 0:
@@ -505,6 +515,7 @@ class EdgeTTSAudioProcessor(FrameProcessor):
         self._sample_rate = sample_rate
         self._task: asyncio.Task | None = None
         self._synthesize_lock = asyncio.Lock()
+        self._sherpa_tts = None
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -539,11 +550,21 @@ class EdgeTTSAudioProcessor(FrameProcessor):
             LOGGER.exception("EdgeTTS synthesis failed")
 
     def _edge_tts_to_pcm(self, text: str) -> bytes:
+        # On the Jetson device, local sherpa is preferred to avoid network timeouts.
+        if Path(self._config.agent.tts.sherpa_model_dir).exists():
+            try:
+                return self._sherpa_to_pcm(text)
+            except Exception as sherpa_exc:
+                LOGGER.warning("sherpa-onnx failed (%s); trying EdgeTTS", sherpa_exc)
         try:
             return self._edge_tts_to_pcm_primary(text)
         except Exception as exc:
-            LOGGER.warning("EdgeTTS unavailable (%s); using local espeak fallback", exc)
-            return self._espeak_to_pcm(text)
+            LOGGER.warning("EdgeTTS unavailable (%s); trying sherpa-onnx local TTS", exc)
+            try:
+                return self._sherpa_to_pcm(text)
+            except Exception as sherpa_exc:
+                LOGGER.warning("sherpa-onnx unavailable (%s); using espeak fallback", sherpa_exc)
+                return self._espeak_to_pcm(text)
 
     def _edge_tts_to_pcm_primary(self, text: str) -> bytes:
         import edge_tts
@@ -560,6 +581,50 @@ class EdgeTTSAudioProcessor(FrameProcessor):
             return self._media_to_pcm(mp3_path)
         finally:
             mp3_path.unlink(missing_ok=True)
+
+    def _get_sherpa_tts(self):
+        if self._sherpa_tts is not None:
+            return self._sherpa_tts
+        import sherpa_onnx
+
+        base = Path(self._config.agent.tts.sherpa_model_dir)
+        vits = sherpa_onnx.OfflineTtsVitsModelConfig(
+            model=str(base / "zh_CN-xiao_ya-medium.onnx"),
+            tokens=str(base / "tokens.txt"),
+            lexicon=str(base / "lexicon.txt"),
+            data_dir=str(base),
+        )
+        model_cfg = sherpa_onnx.OfflineTtsModelConfig(
+            vits=vits,
+            num_threads=self._config.agent.tts.sherpa_num_threads,
+            provider="cpu",
+        )
+        tts_cfg = sherpa_onnx.OfflineTtsConfig(
+            model=model_cfg,
+            rule_fsts=f"{base}/date.fst,{base}/number.fst,{base}/phone.fst",
+        )
+        self._sherpa_tts = sherpa_onnx.OfflineTts(tts_cfg)
+        return self._sherpa_tts
+
+    def _sherpa_to_pcm(self, text: str) -> bytes:
+        import wave
+
+        import numpy as np
+
+        tts = self._get_sherpa_tts()
+        audio = tts.generate(text, sid=0, speed=self._config.agent.tts.sherpa_speed)
+        samples = np.asarray(audio.samples, dtype=np.float32)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            wav_path = Path(tmp.name)
+        try:
+            with wave.open(str(wav_path), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(audio.sample_rate)
+                wav.writeframes((np.clip(samples, -1, 1) * 32767).astype(np.int16).tobytes())
+            return self._media_to_pcm(wav_path)
+        finally:
+            wav_path.unlink(missing_ok=True)
 
     def _espeak_to_pcm(self, text: str) -> bytes:
         if not shutil.which("espeak"):
@@ -623,26 +688,67 @@ def ffmpeg_executable() -> str:
 
 
 def configure_pulse_default_source() -> None:
-    """Match the verified Jetson microphone path: use PulseAudio default source."""
+    """Match the verified Jetson audio path: XFM-DP input and USB audio output."""
     if not sys.platform.startswith("linux") or not shutil.which("pactl"):
         return
     try:
-        listing = subprocess.run(
+        sources = subprocess.run(
             ["pactl", "list", "short", "sources"],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
         ).stdout
-        for line in listing.splitlines():
+        for line in sources.splitlines():
             if "XFM-DP" in line:
                 index = line.split()[0]
                 subprocess.run(["pactl", "set-default-source", index], check=True)
                 LOGGER.info("PulseAudio default source set to XFM-DP source %s", index)
-                return
-        LOGGER.warning("XFM-DP source not found in pactl; keeping current default source")
+                break
+        else:
+            LOGGER.warning("XFM-DP source not found in pactl; keeping current default source")
+
+        sinks = subprocess.run(
+            ["pactl", "list", "short", "sinks"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).stdout
+        preferred = ""
+        for line in sinks.splitlines():
+            lower = line.lower()
+            if "usb" in lower and ("audio" in lower or "c-media" in lower):
+                preferred = line.split()[0]
+                break
+        if preferred:
+            subprocess.run(["pactl", "set-default-sink", preferred], check=True)
+            subprocess.run(["pactl", "set-sink-volume", preferred, "90%"], check=True)
+            LOGGER.info("PulseAudio default sink set to %s", preferred)
     except Exception:
-        LOGGER.exception("Failed to configure PulseAudio default source")
+        LOGGER.exception("Failed to configure PulseAudio defaults")
+
+
+def agent_reset_flag_path(config: AppConfig) -> Path:
+    return Path(config.agent.safety.auth_context_path).parent / "agent_reset.flag"
+
+
+async def monitor_agent_reset(config: AppConfig, task: PipelineTask) -> None:
+    flag = agent_reset_flag_path(config)
+    while True:
+        await asyncio.sleep(0.5)
+        if flag.exists():
+            LOGGER.info("Agent reset requested; stopping")
+            await task.cancel()
+            return
+
+
+def write_agent_status(config: AppConfig, status: str) -> None:
+    path = Path(config.agent.safety.auth_context_path).parent / "agent_status.txt"
+    try:
+        path.write_text(status, encoding="utf-8")
+    except OSError:
+        pass
 
 
 def create_pipeline_task(
@@ -743,11 +849,15 @@ async def run_realtime_pipeline(
 
     @task.event_handler("on_pipeline_started")
     async def on_started(task, frame):
+        write_agent_status(config, "语音对话运行中")
         await asyncio.sleep(0.8)
         await pipeline.push_frame(AssistantTurnCompleteFrame("认证通过，请说开门指令"))
 
+    reset_monitor = asyncio.create_task(monitor_agent_reset(config, task))
     runner = PipelineRunner()
     await runner.run(task)
+    if not reset_monitor.done():
+        reset_monitor.cancel()
 
 
 async def run_pipeline(config: AppConfig, *, input_wav: Path, output_wav: Path, chat_id: str) -> int:
@@ -881,10 +991,16 @@ def main() -> int:
     output_device = args.output_device
     transcriber = None
     if args.wait_auth:
+        agent_reset_flag_path(config).unlink(missing_ok=True)
+        write_agent_status(config, "正在预加载语音识别模型")
         print("Preloading FunASR model...")
         transcriber = FunASRTranscriber(config)
         transcriber.preload()
+        write_agent_status(config, "模型已加载，等待硬件认证")
         wait_for_fresh_auth_context(config)
+        write_agent_status(config, "认证通过，正在启动语音对话")
+    else:
+        write_agent_status(config, "正在启动语音对话")
     print(f"Starting Pipecat real-time voice agent: input={input_device} output={output_device}")
     try:
         import sounddevice  # noqa: F401 - fail early without PortAudio.

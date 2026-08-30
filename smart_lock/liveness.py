@@ -53,6 +53,9 @@ class MediaPipeLivenessChecker:
             base_options=mp.tasks.BaseOptions(model_asset_path=str(model_path)),
             running_mode=mp.tasks.vision.RunningMode.VIDEO,
             num_faces=1,
+            min_face_detection_confidence=self._config.mediapipe_min_face_detection_confidence,
+            min_face_presence_confidence=self._config.mediapipe_min_face_presence_confidence,
+            min_tracking_confidence=self._config.mediapipe_min_tracking_confidence,
         )
         self._landmarker = mp.tasks.vision.FaceLandmarker.create_from_options(options)
 
@@ -78,8 +81,13 @@ class MediaPipeLivenessChecker:
             ears.append((self._eye_aspect_ratio(landmarks, "left") + self._eye_aspect_ratio(landmarks, "right")) / 2.0)
             yaws.append(self._yaw_proxy(landmarks))
 
-        if len(ears) < 5 or len(yaws) < 5:
-            return AuthResult("liveness", False, 0.0, "not enough face landmarks")
+        if len(ears) < self._config.min_landmark_frames or len(yaws) < self._config.min_landmark_frames:
+            return AuthResult(
+                "liveness",
+                False,
+                0.0,
+                f"not enough face landmarks: {max(len(ears), len(yaws))} < {self._config.min_landmark_frames}",
+            )
 
         ear_drop = max(ears) - min(ears)
         yaw_motion = max(yaws) - min(yaws)

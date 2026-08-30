@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import os
 import sys
 import time
 from dataclasses import replace
@@ -23,7 +24,7 @@ from smart_lock.results import AuthResult
 from smart_lock.sensor import create_presence_sensor
 from smart_lock.speaker_id import create_speaker_authenticator
 from smart_lock.voice_feedback import VoiceFeedback
-from smart_lock.auth_context import write_auth_context
+from smart_lock.auth_context import read_auth_context, write_auth_context
 
 LOGGER = logging.getLogger(__name__)
 
@@ -56,6 +57,13 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         self._sensor_true_until = 0.0
         self._models_preloaded = False
         self._auto_auth_paused_until = 0.0
+        self._face_pass_until = 0.0
+        self._liveness_pass_until = 0.0
+        self._speaker_pass_until = 0.0
+        self._last_auth_passed = False
+        self._last_agent_status = ""
+        self._agent_running = False
+        self._presence_lost_at = None
 
         self.setWindowTitle("Jetson 智能门锁 MVP")
         self.resize(1120, 720)
@@ -65,6 +73,11 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         self._camera_timer.timeout.connect(self._update_camera)
         self._sensor_timer = QtCore.QTimer(self)
         self._sensor_timer.timeout.connect(self._update_sensor)
+        self._agent_status_timer = QtCore.QTimer(self)
+        self._agent_status_timer.timeout.connect(self._update_agent_status)
+
+        if os.environ.get("SMART_LOCK_AUTO_START") == "1":
+            QtCore.QTimer.singleShot(500, self.start)
 
     def _build_ui(self) -> None:
         root = QtWidgets.QWidget()
@@ -116,6 +129,10 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         self.people_label.setWordWrap(True)
         panel_layout.addWidget(self.people_label)
 
+        self.agent_status_label = QtWidgets.QLabel("语音 Agent：未启动")
+        self.agent_status_label.setWordWrap(True)
+        panel_layout.addWidget(self.agent_status_label)
+
         buttons = QtWidgets.QHBoxLayout()
         self.start_btn = QtWidgets.QPushButton("启动")
         self.stop_btn = QtWidgets.QPushButton("停止")
@@ -157,12 +174,15 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         self._set_step("当前步骤：正在预加载模型，请稍候")
         self._append("预加载人脸、活体、声纹模型；此过程只在启动时执行一次")
         self._preload_models()
+        self._wait_for_agent_preload()
         self._set_step("当前步骤：待机，仅红外检测")
         self._append("启动红外传感器轮询；摄像头将在红外检测到靠近后开启")
         self._sensor_timer.start(max(100, int(self._config.sensor.poll_interval_seconds * 1000)))
         if not self._config.auto_auth.camera_triggered_by_sensor:
             self._ensure_camera_active("配置为摄像头常开模式")
         self._speak("app_started")
+        self._agent_status_timer.start(1000)
+        self._update_agent_status()
 
     def stop(self) -> None:
         self._set_step("当前步骤：已停止")
@@ -187,6 +207,11 @@ class SmartLockWindow(QtWidgets.QMainWindow):
                 self._on_presence_detected(rising_edge=not self._previous_sensor)
             else:
                 self.sensor_label.setText("1. 红外检测：等待，未检测到人体")
+                now = time.monotonic()
+                if self._presence_lost_at is None:
+                    self._presence_lost_at = now
+                elif now - self._presence_lost_at >= self._config.auto_auth.absence_rearm_seconds:
+                    self._auto_auth_paused_until = 0.0
                 self._maybe_enter_standby()
         except Exception as exc:
             self.sensor_label.setText(f"1. 红外检测：异常，{exc}")
@@ -197,7 +222,15 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             frame = self._camera.read()
             self._last_frame = frame
             face = self._face_backend()
-            self._last_face = face.verify(frame, self._config.system.dry_run)
+            result = face.verify(frame, self._config.system.dry_run)
+            now = time.monotonic()
+            if result.passed:
+                self._face_pass_until = now + self._config.system.result_hold_seconds
+            elif now < self._face_pass_until:
+                result = AuthResult(
+                    "face", True, result.score, "pass state held", result.metadata
+                )
+            self._last_face = result
             self.face_label.setText(self._format_result("2. 人脸识别", self._last_face))
             self._show_frame(self._draw_face(frame.copy(), self._last_face))
             self._maybe_auto_authenticate()
@@ -208,10 +241,12 @@ class SmartLockWindow(QtWidgets.QMainWindow):
     def _on_presence_detected(self, rising_edge: bool) -> None:
         now = time.monotonic()
         self._last_presence_at = now
+        self._presence_lost_at = None
         if rising_edge:
             self._append("红外检测到有人靠近，开启摄像头和人脸识别")
             self._ensure_camera_active("红外检测到有人靠近")
-            self._speak("presence")
+            self._speak("presence", force=True)
+            LOGGER.info("Presence rising edge; voice prompt triggered")
         if not self._auth_in_progress:
             self._set_step("当前步骤：红外已触发，正在做人脸识别")
 
@@ -222,12 +257,24 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             return
         idle = time.monotonic() - self._last_presence_at
         if idle >= self._config.auto_auth.camera_idle_close_seconds:
+            self._request_agent_reset()
             self._stop_camera(f"无人靠近超过 {idle:.1f} 秒")
             self._set_step("当前步骤：回到待机，仅红外检测")
             self.face_label.setText("2. 人脸识别：待机，红外触发后开启")
             self.live_label.setText("3. 活体检测：待机")
             self.speaker_label.setText("4. 声纹识别：待机")
             self.video.setText("待机中：仅红外检测，摄像头未开启")
+
+    def _request_agent_reset(self) -> None:
+        base = Path(self._config.agent.safety.auth_context_path).parent
+        flag = base / "agent_reset.flag"
+        if not flag.exists():
+            flag.write_text("absence-idle", encoding="utf-8")
+            LOGGER.info("Long absence; agent reset requested")
+        try:
+            (base / "auth_context.json").unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def _ensure_camera_active(self, reason: str) -> None:
         if self._camera_active:
@@ -393,9 +440,13 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             speaker_result = self._apply_identity_consistency(face_result, speaker_result)
             self.speaker_label.setText(self._format_result("4. 声纹识别", speaker_result))
             self._speak("voice_pass" if speaker_result.passed else "voice_fail")
+            if live_result.passed:
+                self._liveness_pass_until = time.monotonic() + self._config.system.result_hold_seconds
+            if speaker_result.passed:
+                self._speaker_pass_until = time.monotonic() + self._config.system.result_hold_seconds
 
             decision = self._fusion.decide([sensor_result, face_result, live_result, speaker_result])
-            write_auth_context(self._config.agent.safety.auth_context_path, decision)
+            self._write_decision_context(decision)
             self._set_step("当前步骤：5/5 多模态融合判定")
             self.score_label.setText(f"5. 融合结果：{decision.score:.3f} / 阈值 {self._config.fusion.threshold:.2f}")
 
@@ -406,9 +457,25 @@ class SmartLockWindow(QtWidgets.QMainWindow):
                 self._on_auth_failed(decision.score, sensor_result, face_result, live_result, speaker_result)
         finally:
             self._auth_in_progress = False
-            self._last_auto_auth_at = time.monotonic()
+            if self._last_auth_passed:
+                self._last_auto_auth_at = time.monotonic()
+            else:
+                self._last_auto_auth_at = (
+                    time.monotonic()
+                    - self._config.auto_auth.cooldown_seconds
+                    + self._config.auto_auth.failed_retry_seconds
+                )
             self.auth_btn.setEnabled(True)
             self._maybe_enter_standby()
+
+    def _write_decision_context(self, decision) -> None:
+        path = self._config.agent.safety.auth_context_path
+        if self._config.lock.flow == "agent_confirm" and not decision.passed:
+            existing = read_auth_context(path)
+            if existing and existing.get("fusion_passed") and not existing.get("consumed"):
+                LOGGER.info("Keeping existing valid credential; ignoring failed retry decision")
+                return
+        write_auth_context(path, decision)
 
     def _verify_voice(self) -> AuthResult:
         speaker = self._speaker_backend()
@@ -433,12 +500,13 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         return speaker_result
 
     def _on_auth_passed(self, elapsed: float) -> None:
+        self._last_auth_passed = True
         self._speak("auth_pass", force=True)
         if self._config.lock.flow == "agent_confirm":
             self._set_step("认证通过：请说出开门指令")
             self._append(f"认证通过，用时 {elapsed:.2f} 秒；等待语音 Agent 开门指令")
-            # Keep the microphone free for the voice Agent while the person is present.
-            self._auto_auth_paused_until = self._sensor_true_until + 1.0
+            # Keep the microphone free for the voice Agent until the person leaves.
+            self._auto_auth_paused_until = float("inf")
             return
         if self.allow_unlock.isChecked():
             self._lock.unlock()
@@ -456,6 +524,7 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         live_result: AuthResult,
         speaker_result: AuthResult,
     ) -> None:
+        self._last_auth_passed = False
         self._speak("auth_fail", force=True)
         self._set_step("认证失败：请查看红外、人脸、活体、声纹状态")
         self._append(
@@ -482,8 +551,8 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             except Exception as exc:
                 return AuthResult("liveness", False, 0.0, f"camera failed: {exc}")
             self._last_frame = frame
-            frames.append(frame.copy())
             face = self._face_backend()
+            bbox = None
             if hasattr(face, "detect_largest_face"):
                 bbox, _ = face.detect_largest_face(frame)
                 if bbox is not None:
@@ -491,6 +560,7 @@ class SmartLockWindow(QtWidgets.QMainWindow):
                     centers.append((x + w / 2.0) / frame.shape[1])
                     tracking = AuthResult("face", True, 1.0, "tracking", {"bbox": bbox})
                     self._show_frame(self._draw_face(frame.copy(), tracking))
+            frames.append(self._crop_face_region(frame, bbox).copy() if bbox is not None else frame.copy())
             QtWidgets.QApplication.processEvents()
             time.sleep(0.08)
 
@@ -505,6 +575,19 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             return live_result
         return self._fallback_motion_liveness(centers)
 
+    @staticmethod
+    def _crop_face_region(frame: np.ndarray, bbox: tuple[int, int, int, int], margin: float = 0.35) -> np.ndarray:
+        x, y, w, h = bbox
+        mx = int(w * margin)
+        my = int(h * margin)
+        x1 = max(0, x - mx)
+        y1 = max(0, y - my)
+        x2 = min(frame.shape[1], x + w + mx)
+        y2 = min(frame.shape[0], y + h + my)
+        if x2 - x1 < 80 or y2 - y1 < 80:
+            return frame
+        return frame[y1:y2, x1:x2]
+
     def _fallback_motion_liveness(self, centers: list[float]) -> AuthResult:
         if len(centers) < 5:
             return AuthResult("liveness", False, 0.0, "face tracking failed")
@@ -514,9 +597,27 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         reason = f"motion={motion:.3f}" if passed else f"motion too small ({motion:.3f})"
         return AuthResult("liveness", passed, float(score), reason, {"motion": motion})
 
+    def _wait_for_agent_preload(self, timeout_seconds: float = 180.0) -> None:
+        path = Path(self._config.agent.safety.auth_context_path).parent / "agent_status.txt"
+        deadline = time.monotonic() + timeout_seconds
+        self._set_step("当前步骤：等待语音 Agent 模型加载")
+        self._append("等待语音 Agent 模型加载，请稍候...")
+        while time.monotonic() < deadline:
+            try:
+                status = path.read_text(encoding="utf-8").strip()
+            except OSError:
+                status = ""
+            if any(key in status for key in ("等待硬件认证", "语音对话运行中", "认证通过")):
+                LOGGER.info("Voice Agent ready: %s", status)
+                return
+            QtWidgets.QApplication.processEvents()
+            time.sleep(0.5)
+        LOGGER.warning("Timed out waiting for voice Agent preload; continuing anyway")
+
     def _preload_models(self) -> None:
         if self._models_preloaded:
             return
+        LOGGER.info("GUI model preload started")
         steps = (
             ("人脸识别模型", self._face_backend, "2. 人脸识别"),
             ("活体检测模型", self._liveness_backend, "3. 活体检测"),
@@ -535,6 +636,7 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         self._models_preloaded = True
         self._set_step("当前步骤：模型预加载完成")
         self._append("模型预加载完成")
+        LOGGER.info("GUI model preload finished")
 
     def _face_backend(self):
         if self._face is None:
@@ -560,6 +662,21 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             self._speaker = create_speaker_authenticator(self._config.speaker)
         return self._speaker
 
+    def _update_agent_status(self) -> None:
+        path = Path(self._config.agent.safety.auth_context_path).parent / "agent_status.txt"
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            text = ""
+        if not text:
+            text = "未检测到 Agent 状态文件"
+        if text != self._last_agent_status:
+            self._last_agent_status = text
+            self.agent_status_label.setText(f"语音 Agent：{text}")
+            self._append(f"语音 Agent 状态：{text}")
+            LOGGER.info("Agent status: %s", text)
+            self._agent_running = "运行中" in text
+
     def _show_frame(self, frame: np.ndarray) -> None:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
@@ -584,6 +701,9 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         self.step_label.setText(message)
 
     def _speak(self, key: str, text: str | None = None, force: bool = False, block: bool | None = None) -> None:
+        if self._agent_running:
+            LOGGER.info("Agent is running; GUI voice prompt suppressed: %s", key)
+            return
         if self.voice_enabled.isChecked():
             self._voice.speak(key, text=text, force=force, block=block)
 

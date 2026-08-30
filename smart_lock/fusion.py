@@ -28,6 +28,9 @@ class FusionEngine:
             score += weight * result.score
 
         all_checks_passed = all(result.passed for result in results)
-        passed = all_checks_passed and score >= self._config.threshold
+        if self._config.require_all:
+            passed = all_checks_passed and score >= self._config.threshold
+        else:
+            passed = score >= self._config.threshold
         return FusionDecision(passed=passed, score=score, details=by_name)
 

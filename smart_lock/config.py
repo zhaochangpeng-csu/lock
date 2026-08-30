@@ -31,6 +31,7 @@ class SystemConfig:
     log_level: str
     cooldown_seconds: float
     max_attempt_seconds: float
+    result_hold_seconds: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,7 @@ class LockConfig:
     active_high: bool
     unlock_seconds: float
     flow: str = "immediate"
+    actuator: str = "relay"
 
 
 @dataclass(frozen=True)
@@ -107,6 +109,10 @@ class LivenessConfig:
     mediapipe_model_path: str
     min_blink_ear_drop: float
     min_head_yaw_motion: float
+    min_landmark_frames: int = 3
+    mediapipe_min_face_detection_confidence: float = 0.4
+    mediapipe_min_face_presence_confidence: float = 0.4
+    mediapipe_min_tracking_confidence: float = 0.4
 
 
 @dataclass(frozen=True)
@@ -130,6 +136,8 @@ class SpeakerConfig:
 class AutoAuthConfig:
     enabled: bool = True
     cooldown_seconds: float = 8.0
+    failed_retry_seconds: float = 2.0
+    absence_rearm_seconds: float = 5.0
     require_sensor: bool = True
     require_face: bool = True
     presence_voice_cooldown_seconds: float = 6.0
@@ -150,6 +158,9 @@ class VoiceFeedbackConfig:
     cooldown_seconds: float = 1.2
     block: bool = False
     fallback_to_tts_command: bool = True
+    sherpa_model_dir: str = "models/tts/vits-piper-zh_CN-xiao_ya-medium-int8"
+    sherpa_num_threads: int = 2
+    sherpa_speed: float = 1.0
     messages: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_VOICE_MESSAGES))
 
 
@@ -157,6 +168,7 @@ class VoiceFeedbackConfig:
 class FusionConfig:
     threshold: float
     weights: dict[str, float]
+    require_all: bool = True
 
 
 @dataclass(frozen=True)
@@ -195,6 +207,9 @@ class AgentASRConfig:
 class AgentTTSConfig:
     backend: str = "edge_tts"
     voice: str = "zh-CN-XiaoxiaoNeural"
+    sherpa_model_dir: str = "models/tts/vits-piper-zh_CN-xiao_ya-medium-int8"
+    sherpa_num_threads: int = 2
+    sherpa_speed: float = 1.0
 
 
 @dataclass(frozen=True)
