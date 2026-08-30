@@ -53,7 +53,9 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         self._camera_active = False
         self._last_auto_auth_at = 0.0
         self._last_presence_at = 0.0
-        self._last_presence_voice_at = 0.0
+        self._sensor_true_until = 0.0
+        self._models_preloaded = False
+        self._auto_auth_paused_until = 0.0
 
         self.setWindowTitle("Jetson 智能门锁 MVP")
         self.resize(1120, 720)
@@ -150,13 +152,16 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         self.refresh_people()
 
     def start(self) -> None:
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self._set_step("当前步骤：正在预加载模型，请稍候")
+        self._append("预加载人脸、活体、声纹模型；此过程只在启动时执行一次")
+        self._preload_models()
         self._set_step("当前步骤：待机，仅红外检测")
         self._append("启动红外传感器轮询；摄像头将在红外检测到靠近后开启")
         self._sensor_timer.start(max(100, int(self._config.sensor.poll_interval_seconds * 1000)))
         if not self._config.auto_auth.camera_triggered_by_sensor:
             self._ensure_camera_active("配置为摄像头常开模式")
-        self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
         self._speak("app_started")
 
     def stop(self) -> None:
@@ -169,11 +174,17 @@ class SmartLockWindow(QtWidgets.QMainWindow):
 
     def _update_sensor(self) -> None:
         try:
+            now = time.monotonic()
+            raw_detected = self._sensor.detected()
+            if raw_detected:
+                self._sensor_true_until = now + self._config.sensor.presence_hold_seconds
+            latched = now < self._sensor_true_until
+
             self._previous_sensor = self._last_sensor
-            self._last_sensor = self._sensor.detected()
-            if self._last_sensor:
+            self._last_sensor = latched
+            if latched:
                 self.sensor_label.setText("1. 红外检测：通过，检测到人体靠近")
-                self._on_presence_detected()
+                self._on_presence_detected(rising_edge=not self._previous_sensor)
             else:
                 self.sensor_label.setText("1. 红外检测：等待，未检测到人体")
                 self._maybe_enter_standby()
@@ -194,14 +205,12 @@ class SmartLockWindow(QtWidgets.QMainWindow):
             self.video.setText(f"摄像头异常：{exc}")
             self._append(f"摄像头异常：{exc}")
 
-    def _on_presence_detected(self) -> None:
+    def _on_presence_detected(self, rising_edge: bool) -> None:
         now = time.monotonic()
         self._last_presence_at = now
-        if not self._previous_sensor:
+        if rising_edge:
             self._append("红外检测到有人靠近，开启摄像头和人脸识别")
             self._ensure_camera_active("红外检测到有人靠近")
-        if now - self._last_presence_voice_at >= self._config.auto_auth.presence_voice_cooldown_seconds:
-            self._last_presence_voice_at = now
             self._speak("presence")
         if not self._auth_in_progress:
             self._set_step("当前步骤：红外已触发，正在做人脸识别")
@@ -243,6 +252,8 @@ class SmartLockWindow(QtWidgets.QMainWindow):
 
     def _maybe_auto_authenticate(self) -> None:
         if not self.auto_auth.isChecked() or self._auth_in_progress:
+            return
+        if time.monotonic() < self._auto_auth_paused_until:
             return
         if self._config.auto_auth.require_sensor and not self._last_sensor:
             return
@@ -426,6 +437,8 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         if self._config.lock.flow == "agent_confirm":
             self._set_step("认证通过：请说出开门指令")
             self._append(f"认证通过，用时 {elapsed:.2f} 秒；等待语音 Agent 开门指令")
+            # Keep the microphone free for the voice Agent while the person is present.
+            self._auto_auth_paused_until = self._sensor_true_until + 1.0
             return
         if self.allow_unlock.isChecked():
             self._lock.unlock()
@@ -500,6 +513,28 @@ class SmartLockWindow(QtWidgets.QMainWindow):
         passed = score >= self._config.liveness.min_score
         reason = f"motion={motion:.3f}" if passed else f"motion too small ({motion:.3f})"
         return AuthResult("liveness", passed, float(score), reason, {"motion": motion})
+
+    def _preload_models(self) -> None:
+        if self._models_preloaded:
+            return
+        steps = (
+            ("人脸识别模型", self._face_backend, "2. 人脸识别"),
+            ("活体检测模型", self._liveness_backend, "3. 活体检测"),
+            ("声纹识别模型", self._speaker_backend, "4. 声纹识别"),
+        )
+        for index, (name, loader, label) in enumerate(steps, 1):
+            self._set_step(f"当前步骤：正在预加载 {name}（{index}/3）")
+            self._append(f"预加载 {name} ...")
+            QtWidgets.QApplication.processEvents()
+            try:
+                backend = loader()
+                if name == "声纹识别模型" and hasattr(backend, "ensure_model"):
+                    backend.ensure_model()
+            except Exception as exc:
+                self._append(f"预加载 {name} 失败，将在使用时重试：{self._translate_reason(str(exc))}")
+        self._models_preloaded = True
+        self._set_step("当前步骤：模型预加载完成")
+        self._append("模型预加载完成")
 
     def _face_backend(self):
         if self._face is None:

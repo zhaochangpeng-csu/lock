@@ -3,8 +3,8 @@
 > 最终实现方案以 `docs/LLM_AGENT_PLAN.md`（v2.0）为准。
 > 当前已落地：硬件融合认证后签发一次性短时凭证，由语音 Agent 在对话中请求开锁。
 > 声纹识别为文本无关，不再要求固定口令。
-> Pipecat 连续对话原型已落地并通过 WSL 文件链路测试；真实麦克风/扬声器还需在 Windows/Jetson 验证。
-> `voice_agent.py` 仍是固定时长单轮降级入口。
+> Pipecat 连续对话已在 WSL/Windows/Jetson 上完成验证；`voice_agent.py` 保留为固定时长单轮降级入口。
+> 系统已支持模型预加载、Agent 预启动等待凭证、幂等监督启动。
 
 ## 项目能力
 
@@ -31,7 +31,20 @@ cd ~/smart_lock_ai_20260829_1915
 
 ## 2. 启动界面
 
-直接在 Jetson 桌面上运行：
+推荐使用带进程监督和预加载的一键启动：
+
+```bash
+./run_smart_lock.sh
+```
+
+该脚本会：
+
+- 启动本地工具网关并自动拉起；
+- 预加载 FunASR，并让 Pipecat 语音 Agent 等待硬件认证凭证；
+- 启动 GUI（点击“启动”后会预加载人脸/活体/声纹模型）；
+- 自动监督网关、Agent、GUI 进程。
+
+仅启动 GUI（不带监督）也可以：
 
 ```bash
 ./run_gui.sh
@@ -70,7 +83,7 @@ python3 gui.py --hardware --no-unlock
 
 `config.yaml` 中 `lock.flow` 决定开门方式：
 
-- `agent_confirm`（默认）：硬件融合通过后只签发一个 60 秒有效、一次性认证凭证，**不立即开锁**。用户随后对语音 Agent 说“开门”，Agent 读取凭证并调用 `request_unlock`，由 Jetson 本地安全闸门验证后开锁。
+- `agent_confirm`（默认）：硬件融合通过后只签发一个 300 秒有效、一次性认证凭证，**不立即开锁**。用户随后对语音 Agent 说“开门”，Agent 读取凭证并调用 `request_unlock`，由 Jetson 本地安全闸门验证后开锁。
 - `immediate`：恢复原硬件流程，融合通过后由界面/控制器直接开锁（仍需 `--no-unlock` 或界面勾选保护）。
 
 ## 5. 注册人脸库
@@ -131,12 +144,20 @@ database/voices/姓名/
 WSL 文件链路自测（不需要麦克风，输入/输出都是 WAV）：
 
 ```bash
-python3 voice_agent_pipecat.py   --input-wav /tmp/input.wav   --output-wav /tmp/output.wav
+python3 voice_agent_pipecat.py \
+  --input-wav /tmp/input.wav \
+  --output-wav /tmp/output.wav
 
 RUN_PIPECAT_E2E=1 python3 test_voice_agent_pipecat.py
 ```
 
-Windows/Jetson 真机模式（Windows 请使用 conda 的 `python` 或完整路径，不要用 `python3`）：
+Jetson 一键启动（推荐）：
+
+```bash
+./run_smart_lock.sh
+```
+
+Windows 真机模式（Windows 请使用 conda 的 `python` 或完整路径，不要用 `python3`）：
 
 ```powershell
 $py = "$env:USERPROFILE\miniconda3\envs\py3.10\python.exe"
@@ -144,7 +165,13 @@ $py = "$env:USERPROFILE\miniconda3\envs\py3.10\python.exe"
 & $py voice_agent_pipecat.py --input-device <输入设备> --output-device <输出设备>
 ```
 
-原型能力：Silero VAD 分段、用户说话时打断、FunASR 转写、FastGPT 流式回复、EdgeTTS 合成、sounddevice 输入输出。Jetson 真机上的回声消除、延迟和资源占用仍待验证。
+预启动模式（Jetson 监督脚本已自动使用）：先加载 FunASR，等待硬件认证凭证后再打开麦克风：
+
+```bash
+python3 voice_agent_pipecat.py --wait-auth
+```
+
+原型能力：Silero VAD 分段、用户说话时打断、FunASR 转写、FastGPT 流式回复、EdgeTTS 合成、sounddevice 输入输出。回声消除和长时间稳定性仍待现场持续验证。
 
 ### 8.2 单轮降级入口
 

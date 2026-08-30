@@ -18,6 +18,10 @@ sensor:
   active_high: true
   poll_interval_seconds: 0.1
   mock_trigger_interval_seconds: 8.0
+  # Once the infrared reports a person, keep the latched presence state for
+  # this many seconds. This avoids flapping when the sensor is slow or drops
+  # out briefly, and prevents repeated "person detected" voice prompts.
+  presence_hold_seconds: 3.0
   serial:
     port_candidates:
       - "/dev/ttyUSB0"

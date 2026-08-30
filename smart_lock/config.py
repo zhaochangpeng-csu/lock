@@ -61,6 +61,7 @@ class SensorConfig:
     active_high: bool
     poll_interval_seconds: float
     mock_trigger_interval_seconds: float
+    presence_hold_seconds: float = 3.0
     serial: Optional[SensorSerialConfig] = None
 
 

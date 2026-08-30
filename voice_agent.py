@@ -151,6 +151,10 @@ class FunASRTranscriber:
         self._config = config
         self._model = None
 
+    def preload(self) -> None:
+        """Load the ASR model now instead of during the first user turn."""
+        self._get_model()
+
     def transcribe(self, wav_path: Path) -> str:
         model = self._get_model()
         result = model.generate(input=str(wav_path), language="zh", use_itn=True)

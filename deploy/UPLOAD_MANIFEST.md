@@ -9,6 +9,7 @@ config.yaml
 requirements.txt
 requirements-agent.txt
 run_gui.sh
+run_smart_lock.sh
 main.py
 gui.py
 check_runtime.py
@@ -44,8 +45,8 @@ Jetson responsibilities:
 
 - Read infrared sensor, camera, microphone, and GPIO relay.
 - Run face recognition, liveness detection, speaker recognition.
-- Run the direct voice entry and local SenseVoice ASR; Pipecat integration remains pending.
-- Use online `edge-tts` for the current MVP; offline TTS remains pending.
+- Run `voice_agent.py` fallback and `voice_agent_pipecat.py --wait-auth` with local SenseVoice ASR.
+- Use online `edge-tts` today; local sherpa-onnx VITS is selected but not wired yet.
 - Expose only authenticated HTTP tools for FastGPT.
 - Enforce `request_unlock` safety gates locally.
 
@@ -58,6 +59,7 @@ export LOCK_TOOL_GATEWAY_PORT=8787
 export SMART_LOCK_NO_UNLOCK=1
 python3 lock_tool_gateway.py --host "$LOCK_TOOL_GATEWAY_HOST" --port "$LOCK_TOOL_GATEWAY_PORT"
 DISPLAY=:0 ./run_gui.sh
+run_smart_lock.sh
 python3 deploy/download_voice_models.py
 deploy/install_jetson_agent.sh
 deploy/requirements-agent-jetson.txt

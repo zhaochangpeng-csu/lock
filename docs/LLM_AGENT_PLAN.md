@@ -169,6 +169,13 @@ FastGPT 应用只注册以下工具：
 
 ## 8. 连续对话：Pipecat 接入方案
 
+### 8.0 预加载与预启动（已实现）
+
+- GUI 点击“启动”后先预加载 InsightFace、MediaPipe、SpeechBrain，再开始红外轮询。
+- `voice_agent_pipecat.py --wait-auth` 在后台预加载 FunASR，并等待新鲜硬件凭证；凭证写入后才打开麦克风，避免和 GUI 声纹录音冲突。
+- `run_smart_lock.sh` 幂等启动并监督 gateway / agent / GUI，启动时清理旧凭证。
+- 红外检测增加 `presence_hold_seconds` 状态保持，提示音只在无人→有人上升沿播报一次。
+
 ### 8.1 Pipecat 的职责
 
 - 音频输入/输出流水线生命周期。

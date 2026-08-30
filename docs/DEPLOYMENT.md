@@ -35,18 +35,25 @@ Validated Pipecat prototype in WSL and Windows (2026-08-30):
 - Windows `--list-devices` works and enumerates 25 audio devices. Use the conda Python (`python` or the full path), not the Microsoft Store `python3` stub.
 - `voice_agent_pipecat.py` now resolves ffmpeg as: system PATH `ffmpeg` first, then `imageio-ffmpeg`.
 
-Jetson Pipecat dependency risk (must resolve before hardware deployment):
+Jetson Pipecat dependency resolution (2026-08-30, validated):
 
-- `pipecat-ai 0.0.108` requires Python >=3.10 and base dependency `onnxruntime~=1.23.2`; the available aarch64 wheel index only has onnxruntime up to 1.16.3.
-- `pipecat-ai` itself is `py3-none-any`, so aarch64 installation is possible, but dependency resolution will fail on the current 0.0.108.
-- Mitigation options: pin an older Pipecat release whose onnxruntime requirement is an optional extra and install `onnxruntime==1.16.3` separately; or provide/build an aarch64 onnxruntime 1.23 wheel for Jetson. Decide during Phase D after testing on the actual Jetson.
+- Install with `deploy/install_jetson_agent.sh`: `pipecat-ai==0.0.108 --no-deps` plus aarch64-compatible `numba==0.60.0`, `onnxruntime==1.16.3`, `soxr==0.5.0.post1`, `numpy<2`.
+- The substituted combination passed the WSL full file-pipeline E2E before deployment.
 
-Not yet validated on the physical Jetson:
+Validated on the physical Jetson (2026-08-30):
 
-- Microphone capture and speaker playback device names.
-- SenseVoice inference latency and memory usage on Jetson Nano.
-- Full microphone -> ASR -> Agent -> TTS round trip and relay behavior.
-- Pipecat barge-in behavior with real microphones/speakers, echo cancellation, and latency.
+- `deploy/check_jetson_agent.py` passed.
+- Unit tests passed: `test_agent`, `test_speaker_id`, `test_voice_agent`, `test_voice_agent_pipecat`.
+- `check_runtime.py` passed: InsightFace / MediaPipe / SpeechBrain ready, face/voice database loaded.
+- Infrared sensor on `/dev/ttyUSB0`, XFM-DP microphone, and USB audio output were detected.
+- Pipecat real-time voice conversation worked with real microphone and speaker.
+- Full chain with simulated hardware credential worked: Jetson Pipecat ASR -> FastGPT -> `current_auth_context` -> `request_unlock` -> dry-run gate `allowed=false`.
+
+Still to validate on the physical Jetson:
+
+- Real GPIO relay action (requires supervised hardware test; keep `SMART_LOCK_NO_UNLOCK=1`).
+- Long-running barge-in / echo / latency stability.
+- Direct PC firewall rule for `http://192.168.1.111:3300` (E2E used an SSH reverse tunnel while the direct path was blocked).
 
 `lock.flow` selects the unlock workflow. `immediate` preserves the original hardware behavior. `agent_confirm` records a short-lived hardware fusion credential and waits for the user to ask the voice Agent to open the door. The Agent cannot rescore or override that credential.
 
@@ -67,13 +74,12 @@ $py = "$env:USERPROFILE\miniconda3\envs\py3.10\python.exe"
 
 Replace device `1` with an input-capable index reported by `sounddevice`. On this Windows machine, input device `1` recorded successfully at 16 kHz. The dependency check, local SenseVoice inference, FastGPT response, EdgeTTS generation, and Windows playback have been validated.
 
-On Jetson, the audio protocol is fixed to the already validated hardware path:
+On Jetson, the audio protocol is:
 
-- Input: `sounddevice -> PortAudio -> ALSA`, mono, 16 kHz.
-- Output: EdgeTTS MP3 -> `ffmpeg` S16LE conversion -> ALSA `aplay` using `voice_feedback.pcm_device`, rate, format, and channels.
-- When `voice_feedback.backend=aplay_pcm`, playback does not silently fall back to `ffplay`, `mpg123`, or `mpv`.
-
-Pipecat is the planned runtime for the final continuous-conversation experience: streaming audio orchestration, VAD/turn detection, interruption handling, and STT/LLM/TTS pipeline lifecycle. The current fixed-duration one-turn loop is the fallback until Pipecat is validated on Jetson.
+- Input: `sounddevice -> PortAudio -> PulseAudio default source`, XFM-DP microphone, mono 16 kHz.
+- Pipecat TTS: EdgeTTS MP3 -> `ffmpeg` direct 44.1 kHz mono S16LE -> `sounddevice` default sink; no second resampling step.
+- GUI prompts: original `aplay` PCM path with `voice_feedback.pcm_device`, rate, format, and channels remains unchanged.
+- `voice_agent.py` remains the fixed-duration fallback entry point.
 
 ## Target Split
 
@@ -157,8 +163,14 @@ Hardware validation:
 python3 test_sensor.py --count 10 --verbose
 python3 test_audio.py --seconds 1
 python3 test_voice_prompt.py voice_prompt
-DISPLAY=:0 ./run_gui.sh
+DISPLAY=:0 ./run_smart_lock.sh
 ```
+
+`run_smart_lock.sh` is idempotent and supervised:
+- starts/restarts `lock_tool_gateway.py`;
+- starts `voice_agent_pipecat.py --wait-auth`, which preloads FunASR and waits for a fresh hardware credential before opening the microphone;
+- starts `gui.py --hardware --no-unlock`; the GUI preloads face/liveness/speaker models when `启动` is clicked;
+- clears stale `auth_context.json` on startup.
 
 Start the Jetson tool gateway:
 

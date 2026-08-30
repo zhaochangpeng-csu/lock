@@ -21,7 +21,14 @@ from loguru import logger
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from smart_lock.config import load_config
 from voice_agent import _extract_stream_delta
-from voice_agent_pipecat import TurnAudioCollector, _int16_frames_from_pcm, _pcm16_from_float32, _write_wav, run_pipeline
+from voice_agent_pipecat import (
+    TurnAudioCollector,
+    _int16_frames_from_pcm,
+    _pcm16_from_float32,
+    _write_wav,
+    run_pipeline,
+    wait_for_fresh_auth_context,
+)
 
 
 class RecordingSink(FrameProcessor):
@@ -96,6 +103,36 @@ def test_interruption_signal() -> None:
     logger.enable("pipecat")
 
 
+def test_wait_for_fresh_auth_context() -> None:
+    import json
+    from dataclasses import replace
+    from datetime import datetime, timezone
+
+    base = load_config("config.yaml")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "auth_context.json"
+        cfg = replace(
+            base,
+            agent=replace(
+                base.agent,
+                safety=replace(base.agent.safety, auth_context_path=str(path)),
+            ),
+        )
+        path.write_text(
+            json.dumps(
+                {
+                    "credential_id": "wait-auth-test",
+                    "time": datetime.now(timezone.utc).isoformat(),
+                    "fusion_passed": True,
+                    "fusion_score": 0.95,
+                    "consumed": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        wait_for_fresh_auth_context(cfg, timeout_seconds=5)
+
+
 def test_e2e_file_pipeline() -> None:
     if os.getenv("RUN_PIPECAT_E2E") != "1":
         print("skip full Pipecat e2e (set RUN_PIPECAT_E2E=1 to run)")
@@ -130,5 +167,6 @@ if __name__ == "__main__":
     test_audio_helpers()
     test_turn_collector()
     test_interruption_signal()
+    test_wait_for_fresh_auth_context()
     test_e2e_file_pipeline()
     print("voice_agent_pipecat tests passed")

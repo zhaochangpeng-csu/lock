@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -400,10 +401,16 @@ class TurnAudioCollector(FrameProcessor):
 
 
 class FunASRTranscriberProcessor(FrameProcessor):
-    def __init__(self, config: AppConfig, **kwargs) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        transcriber: FunASRTranscriber | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__(**kwargs)
         self._config = config
-        self._transcriber: FunASRTranscriber | None = None
+        self._transcriber = transcriber
         self._task: asyncio.Task | None = None
         self._transcribe_lock = asyncio.Lock()
 
@@ -648,14 +655,20 @@ def build_pipeline(
     output_transport: FrameProcessor,
     chat_id: str,
     sample_rate: int = 16000,
+    tts_sample_rate: int | None = None,
+    transcriber: FunASRTranscriber | None = None,
 ) -> Pipeline:
     collector = TurnAudioCollector(
         sample_rate=sample_rate, min_turn_seconds=VAD_MIN_TURN_SECONDS
     )
-    transcriber = FunASRTranscriberProcessor(config)
+    transcriber_processor = FunASRTranscriberProcessor(config, transcriber=transcriber)
     llm = FastGPTChatProcessor(config, chat_id=chat_id)
-    tts = EdgeTTSAudioProcessor(config, sample_rate=sample_rate)
-    return Pipeline([input_transport, collector, transcriber, llm, tts, output_transport])
+    tts = EdgeTTSAudioProcessor(
+        config, sample_rate=tts_sample_rate or sample_rate
+    )
+    return Pipeline(
+        [input_transport, collector, transcriber_processor, llm, tts, output_transport]
+    )
 
 
 async def run_realtime_pipeline(
@@ -666,6 +679,7 @@ async def run_realtime_pipeline(
     chat_id: str,
     sample_rate: int = 16000,
     output_sample_rate: int = 44100,
+    transcriber: FunASRTranscriber | None = None,
 ) -> None:
     if input_device is None:
         configure_pulse_default_source()
@@ -689,6 +703,8 @@ async def run_realtime_pipeline(
         output_transport=output_transport,
         chat_id=chat_id,
         sample_rate=sample_rate,
+        tts_sample_rate=output_sample_rate,
+        transcriber=transcriber,
     )
     task = create_pipeline_task(
         pipeline,
@@ -760,6 +776,34 @@ async def run_pipeline(config: AppConfig, *, input_wav: Path, output_wav: Path, 
     return output_transport.bytes_written
 
 
+def wait_for_fresh_auth_context(config: AppConfig, timeout_seconds: float = 0.0) -> None:
+    """Block until the GUI writes a fresh, unconsumed fusion credential."""
+    from datetime import datetime, timezone
+
+    from smart_lock.auth_context import read_auth_context
+
+    path = config.agent.safety.auth_context_path
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds > 0 else None
+    print(f"Waiting for hardware auth context: {path}")
+    while True:
+        record = read_auth_context(path)
+        if record and record.get("fusion_passed") and not record.get("consumed"):
+            raw_time = record.get("time") or record.get("timestamp")
+            try:
+                created = datetime.fromisoformat(str(raw_time).replace("Z", "+00:00"))
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - created).total_seconds()
+                if 0 <= age <= config.agent.safety.auth_context_max_age_seconds:
+                    print(f"Fresh auth context found (age={age:.1f}s)")
+                    return
+            except (TypeError, ValueError):
+                pass
+        if deadline is not None and time.monotonic() > deadline:
+            raise TimeoutError("Timed out waiting for hardware auth context")
+        time.sleep(0.5)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Pipecat continuous voice agent prototype")
     parser.add_argument("--config", default="config.yaml")
@@ -775,6 +819,11 @@ def main() -> int:
     parser.add_argument("--output-wav", default=None, help="Write generated TTS to this WAV")
     parser.add_argument("--chat-id", default="smart-lock-pipecat")
     parser.add_argument("--list-devices", action="store_true", help="List sounddevice audio devices")
+    parser.add_argument(
+        "--wait-auth",
+        action="store_true",
+        help="Preload FunASR and wait for a fresh hardware credential before opening the microphone",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -804,6 +853,12 @@ def main() -> int:
 
     input_device = args.input_device
     output_device = args.output_device
+    transcriber = None
+    if args.wait_auth:
+        print("Preloading FunASR model...")
+        transcriber = FunASRTranscriber(config)
+        transcriber.preload()
+        wait_for_fresh_auth_context(config)
     print(f"Starting Pipecat real-time voice agent: input={input_device} output={output_device}")
     try:
         import sounddevice  # noqa: F401 - fail early without PortAudio.
@@ -817,6 +872,7 @@ def main() -> int:
             input_device=input_device,
             output_device=output_device,
             chat_id=args.chat_id,
+            transcriber=transcriber,
         )
     )
     return 0
