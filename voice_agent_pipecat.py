@@ -539,6 +539,13 @@ class EdgeTTSAudioProcessor(FrameProcessor):
             LOGGER.exception("EdgeTTS synthesis failed")
 
     def _edge_tts_to_pcm(self, text: str) -> bytes:
+        try:
+            return self._edge_tts_to_pcm_primary(text)
+        except Exception as exc:
+            LOGGER.warning("EdgeTTS unavailable (%s); using local espeak fallback", exc)
+            return self._espeak_to_pcm(text)
+
+    def _edge_tts_to_pcm_primary(self, text: str) -> bytes:
         import edge_tts
 
         proxy = os_getenv_proxy()
@@ -550,28 +557,47 @@ class EdgeTTSAudioProcessor(FrameProcessor):
                     text, self._config.agent.tts.voice, proxy=proxy
                 ).save(str(mp3_path))
             )
-            converted = subprocess.run(
-                [
-                    ffmpeg_executable(),
-                    "-loglevel",
-                    "error",
-                    "-y",
-                    "-i",
-                    str(mp3_path),
-                    "-f",
-                    "s16le",
-                    "-ar",
-                    str(self._sample_rate),
-                    "-ac",
-                    "1",
-                    "-",
-                ],
-                check=True,
-                stdout=subprocess.PIPE,
-            )
-            return converted.stdout
+            return self._media_to_pcm(mp3_path)
         finally:
             mp3_path.unlink(missing_ok=True)
+
+    def _espeak_to_pcm(self, text: str) -> bytes:
+        if not shutil.which("espeak"):
+            raise RuntimeError("EdgeTTS failed and espeak fallback is not installed")
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            wav_path = Path(tmp.name)
+        try:
+            subprocess.run(
+                ["espeak", "-v", "zh", "-s", "160", "-w", str(wav_path), text],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return self._media_to_pcm(wav_path)
+        finally:
+            wav_path.unlink(missing_ok=True)
+
+    def _media_to_pcm(self, media_path: Path) -> bytes:
+        converted = subprocess.run(
+            [
+                ffmpeg_executable(),
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(media_path),
+                "-f",
+                "s16le",
+                "-ar",
+                str(self._sample_rate),
+                "-ac",
+                "1",
+                "-",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+        )
+        return converted.stdout
 
 
 def os_getenv_proxy() -> str | None:

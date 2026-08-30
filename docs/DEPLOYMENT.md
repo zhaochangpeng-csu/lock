@@ -23,10 +23,10 @@ Validated in the current WSL environment (2026-08-30):
 
 Local TTS decision (2026-08-30):
 
-- `piper-tts` direct installation is NOT viable for Jetson Nano: `piper-phonemize` has no aarch64 Python 3.8 wheel in the available index.
+- `piper-tts` direct installation is NOT viable for Jetson aarch64: `piper-phonemize` has no aarch64 wheel in the available index.
 - `sherpa-onnx 1.13.6` has a Python 3.8 aarch64 manylinux wheel and supports offline VITS/Piper voices. It is the chosen local TTS runtime.
 - WSL smoke test passed: `vits-piper-zh_CN-xiao_ya-medium-int8` (13.4 MB) synthesized a valid 2.72 s Chinese WAV with non-zero audio. The model card says that voice is non-commercial, so it is a smoke-test voice only; select the final voice after checking its license.
-- Remaining work: benchmark latency and memory on Jetson Nano, and validate playback through the required `ffmpeg -> aplay -D plughw:Device` path on the real hardware.
+- Remaining work: wire sherpa-onnx VITS into Pipecat and benchmark on the real Jetson; EdgeTTS remains the current online TTS.
 
 Validated Pipecat prototype in WSL and Windows (2026-08-30):
 
@@ -83,18 +83,18 @@ On Jetson, the audio protocol is:
 
 ## Target Split
 
-Use Jetson Nano for hardware and voice I/O. Use a local PC, lab server, or cloud VM for FastGPT.
+Use a Jetson edge device for hardware and voice I/O. The validated board is an Orin NX (7.4GB RAM); the deployment plan remains compatible with Jetson Nano after a memory re-benchmark. Use a local PC, lab server, or cloud VM for FastGPT.
 
 Keep Docker on the FastGPT side. Keep the Jetson realtime path native Python plus systemd/venv/conda, because microphone capture, ASR/TTS latency, GPIO, and relay control are easier to supervise directly on the hardware.
 
 ```text
-Jetson Nano:
+Jetson edge device (validated on Orin NX):
   smart lock Python project
   camera / infrared / microphone / relay
   face / liveness / speaker recognition
-  direct Python voice entry today; Pipecat continuous conversation (planned)
-  FunASR/SenseVoice today; smaller sherpa-onnx streaming ASR (planned)
-  edge-tts TTS today; local sherpa-onnx VITS/Piper TTS (planned)
+  Pipecat continuous voice agent + voice_agent.py fallback
+  FunASR/SenseVoice today; smaller sherpa-onnx streaming ASR is the next step
+  edge-tts TTS today; local sherpa-onnx VITS/Piper TTS is the next step
   authenticated lock tool gateway
 
 Local PC or server:
@@ -108,12 +108,12 @@ Local PC or server:
 Install the base project dependencies first:
 
 ```bash
-# Pipecat requires Python >= 3.10. Use Miniforge/conda Python 3.10 on Jetson Nano.
+# Pipecat requires Python >= 3.10. Use Miniforge/conda Python 3.10 on Jetson.
 python -m pip install -r requirements.txt
 python -m pip install -r requirements-agent.txt
 ```
 
-On Jetson Nano, install Pipecat with the verified aarch64 dependency set instead of the x86 constraints:
+On Jetson aarch64, install Pipecat with the verified dependency set instead of the x86 constraints:
 
 ```bash
 bash deploy/install_jetson_agent.sh

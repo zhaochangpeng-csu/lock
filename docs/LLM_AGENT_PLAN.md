@@ -19,8 +19,8 @@
    - 需要满足最短有效语音时长、避免把 Agent 播报声录进去、人脸身份与声纹身份一致。
 4. **语音交互目标为连续自然对话、可随时打断、低延迟流式。**
    - 采用 Pipecat 作为音频流水线编排。
-   - 在 Pipecat 未完成接入前，保留现有 `voice_agent.py` 固定时长单轮模式作为降级路径。
-5. **Jetson Nano 资源优先。**
+   - `voice_agent_pipecat.py` 已完成基础验证；`voice_agent.py` 保留为固定时长单轮降级路径。
+5. **Jetson 边缘设备资源优先。**（实测设备为 Orin NX 7.4GB；原 Jetson Nano 4GB 部署前需重新做内存基准。）
    - 不追求大模型；ASR/TTS 优先选择可在 aarch64 CPU 上运行的轻量方案。
    - 最终本地 TTS 选型为 `sherpa-onnx`（VITS/Piper 语音模型），不直接使用 `piper-tts`。
 
@@ -44,7 +44,7 @@
 
 ```text
 ┌────────────────────────────────────────────────────────────┐
-│ Jetson Nano（本地，硬件 + 实时语音 + 最终安全裁决）          │
+│ Jetson 边缘设备（本地，硬件 + 实时语音 + 最终安全裁决）        │
 │                                                            │
 │  红外传感器（常驻）                                          │
 │  摄像头 / 人脸 / 活体 / 文本无关声纹                          │
@@ -122,7 +122,7 @@ BYE
   - 连续对话期间，只要后台认证条件仍然成立，由本地认证状态机周期性刷新凭证时间。
   - 红外持续无人或会话结束，立即作废凭证。
 - 配置：
-  - 已设置 `auth_context_max_age_seconds: 60`。
+  - 已设置 `auth_context_max_age_seconds: 300`。
   - 连续对话接入后配套“在场刷新 + 离开作废”。
 
 ## 6. Agent 与工具（只做受控操作）
@@ -186,14 +186,14 @@ FastGPT 应用只注册以下工具：
 
 ### 8.2 降级路径
 
-- Pipecat 未稳定前，`voice_agent.py --loop` 继续作为固定时长单轮降级模式。
+- Pipecat 基础连续对话已验证；`voice_agent.py` 继续作为固定时长单轮降级模式。
 - 安全闸门、凭证、工具接口不依赖 Pipecat。
 
 ### 8.3 接入顺序
 
 1. PC/Windows 上用真实麦克风、扬声器完成连续对话原型。
 2. 验证 FastGPT 流式输出与工具调用兼容性。
-3. Jetson Nano 上验证 PortAudio/ALSA、回声、打断和实时性。
+3. 已在实测 Jetson（Orin NX）上验证 PortAudio/PulseAudio、真麦克风/音箱和基础连续对话；长时间回声、打断和实时性仍需现场持续验证。
 4. 通过后才替换 `voice_agent.py` 成为默认语音入口。
 
 ## 9. ASR/TTS 与 Jetson 资源策略
@@ -201,7 +201,7 @@ FastGPT 应用只注册以下工具：
 ### 9.1 ASR
 
 - 现状：FunASR SenseVoiceSmall + FSMN-VAD，WSL CPU 峰值约 3.62 GB。
-- Jetson Nano 资源风险：高。必须做整机内存基准测试。
+- 实测设备（Orin NX，7.4GB）上 FunASR 已正常运行；原 Jetson Nano 4GB 资源风险仍为高，必须做整机内存基准测试。
 - 目标：换更小的流式 ASR，优先评估 `sherpa-onnx` 的流式 ASR 模型（Zipformer/Paraformer 小模型），或对 SenseVoice 做量化。
 - 验收标准：ASR 单进程内存峰值低于 Jetson 可用内存的 30%，首字延迟可接受。
 
@@ -216,9 +216,9 @@ FastGPT 应用只注册以下工具：
 - 播放协议不变：TTS 输出 → ffmpeg 转 S16LE 16 kHz 单声道 → `aplay -D plughw:Device`。
 - Windows/WSL 开发机可使用 edge-tts 或本机播放器做功能预验收，不代表 Jetson 协议。
 
-### 9.3 Jetson Nano 资源预算（待实测）
+### 9.3 Jetson 资源预算
 
-- 同时运行人脸 + 活体 + 声纹 + 流式 ASR + 本地 TTS + Pipecat + 网关，必须在整机 4 GB 内存内通过。
+- 实测 Orin NX（7.4GB）上，人脸 + 活体 + 声纹 + FunASR + Pipecat + 网关已同时工作；原 Jetson Nano 4GB 部署前必须重新做整机内存预算。
 - 任一模型超预算时，按优先级卸载：先换更小 ASR，再考虑 TTS 降级到 edge-tts 或提示音。
 
 ## 10. 配置结构（清理后）
@@ -240,7 +240,7 @@ agent:
   asr: { backend, model, vad_model, download_root, device, record_seconds }
   tts: { backend, voice }
   safety:
-    auth_context_max_age_seconds: 60
+    auth_context_max_age_seconds: 300
     auth_context_path: "logs/auth_context.json"
     auth_context_path_env: "LOCK_AUTH_CONTEXT_PATH"
 ```
@@ -258,11 +258,11 @@ agent:
   - GUI/后台状态机已去掉口令提示。
   - 已验证 `face.identity == speaker.identity` 逻辑保留。
   - 待 Pipecat 接入时，把 VAD 用户语音段实际喂给 accumulator。
-- **Phase C：Pipecat 连续对话（原型完成，真机待验）**
-  - 已新增 `voice_agent_pipecat.py`：Silero VAD、用户打断、FunASR、FastGPT 流式、EdgeTTS、sounddevice 传输。
-  - WSL 文件链路 E2E 已通过：输入 WAV → VAD → ASR → FastGPT 流式 → TTS → 输出 WAV。
-  - 待验：Windows/Jetson 真机麦克风、扬声器、打断体验、回声消除和延迟。
-  - 工具调用链路（current_auth_context → request_unlock）仍由 FastGPT 工具链测试覆盖。
+- **Phase C：Pipecat 连续对话（基础验证完成）**
+  - `voice_agent_pipecat.py` 已实现：Silero VAD、用户打断、FunASR、FastGPT 流式、EdgeTTS、动态音频设备。
+  - WSL 文件链路、Windows 真麦克风、Jetson 真麦克风/音箱均已跑通。
+  - 工具调用链路（current_auth_context → request_unlock）已通过。
+  - 待持续验证：长时间回声消除、打断体验和延迟。
 - **Phase D：Jetson 集成**
   - Pipecat/Jetson 依赖方案已确定并验证：`pipecat-ai==0.0.108 --no-deps` + `numba==0.60.0` + `onnxruntime==1.16.3` + `soxr==0.5.0.post1`；全部依赖已确认有 aarch64 cp310 轮子。
   - 安装入口：`deploy/install_jetson_agent.sh`，预检：`deploy/check_jetson_agent.py`。

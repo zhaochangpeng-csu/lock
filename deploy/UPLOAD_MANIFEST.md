@@ -1,6 +1,8 @@
 # Smart Lock Deployment Manifest
 
-## Jetson Nano
+## Jetson Edge Device
+
+Validated on Jetson Orin NX; Jetson Nano requires a memory re-benchmark.
 
 Upload and run the hardware project on Jetson:
 

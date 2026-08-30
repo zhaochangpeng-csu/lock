@@ -265,7 +265,7 @@ speaker:
   backend: speechbrain_ecapa
   min_score: 0.7
   voice_dir: "database/voices"
-  input_device: 2
+  input_device: null   # null = 使用 PulseAudio 默认录音源（Jetson 验证路径）
   sample_rate: 16000
   record_seconds: 2.5
   min_speech_seconds: 2.0
@@ -279,7 +279,7 @@ lock:
 
 agent:
   safety:
-    auth_context_max_age_seconds: 60.0
+    auth_context_max_age_seconds: 300.0
     auth_context_path: "logs/auth_context.json"
 ```
 
