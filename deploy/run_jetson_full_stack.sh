@@ -9,8 +9,41 @@ CONTROL_PATH="${CONTROL_PATH:-/tmp/smart-lock-jetson-tunnel.sock}"
 LOCAL_GATEWAY_BIND="${LOCAL_GATEWAY_BIND:-0.0.0.0}"
 TOOL_GATEWAY_PORT="${LOCK_TOOL_GATEWAY_PORT:-8787}"
 FASTGPT_PORT="${FASTGPT_PORT:-3300}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+LOCAL_RUN_DIR="${LOCAL_RUN_DIR:-$ROOT/logs/run}"
+EVENT_SYNC_PID="$LOCAL_RUN_DIR/jetson-event-sync.pid"
+EVENT_SYNC_LOG="${EVENT_SYNC_LOG:-$ROOT/logs/jetson-event-sync.log}"
 REMOTE="$JETSON_USER@$JETSON_HOST"
 SSH=(ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=8)
+
+event_sync_running() {
+  local pid=""
+  [ -f "$EVENT_SYNC_PID" ] && pid="$(cat "$EVENT_SYNC_PID" 2>/dev/null || true)"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+start_event_sync() {
+  event_sync_running && return 0
+  mkdir -p "$LOCAL_RUN_DIR" "$(dirname "$EVENT_SYNC_LOG")"
+  rm -f "$EVENT_SYNC_PID"
+  nohup "$ROOT/deploy/watch_jetson_event.sh" >> "$EVENT_SYNC_LOG" 2>&1 < /dev/null &
+  echo $! > "$EVENT_SYNC_PID"
+  echo "event sync started pid=$(cat "$EVENT_SYNC_PID")"
+}
+
+stop_event_sync() {
+  local pid=""
+  [ -f "$EVENT_SYNC_PID" ] && pid="$(cat "$EVENT_SYNC_PID" 2>/dev/null || true)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.2
+    done
+  fi
+  rm -f "$EVENT_SYNC_PID"
+  echo "event sync stopped"
+}
 
 tunnel_running() {
   [ -S "$CONTROL_PATH" ] && ssh -S "$CONTROL_PATH" -O check "$REMOTE" >/dev/null 2>&1
@@ -62,11 +95,17 @@ stop_remote() {
 
 status() {
   if tunnel_running; then echo "tunnel: running"; else echo "tunnel: stopped"; fi
+  if event_sync_running; then
+    echo "event_sync: running pid=$(cat "$EVENT_SYNC_PID")"
+  else
+    echo "event_sync: stopped"
+  fi
   "${SSH[@]}" "$REMOTE" "cd '$JETSON_PROJECT' && ./run_smart_lock.sh status"
 }
 
 cleanup() {
   trap - EXIT INT TERM HUP
+  stop_event_sync
   stop_remote
   stop_tunnel
 }
@@ -75,6 +114,7 @@ case "${1:-run}" in
   start)
     start_tunnel
     start_remote
+    start_event_sync
     status
     ;;
   stop)
@@ -84,21 +124,39 @@ case "${1:-run}" in
     cleanup
     start_tunnel
     start_remote
+    start_event_sync
     status
     ;;
   status)
     status
     ;;
+  sync-start)
+    start_event_sync
+    if event_sync_running; then
+      echo "event_sync: running pid=$(cat "$EVENT_SYNC_PID")"
+    fi
+    ;;
+  sync-stop)
+    stop_event_sync
+    ;;
+  sync-status)
+    if event_sync_running; then
+      echo "event_sync: running pid=$(cat "$EVENT_SYNC_PID")"
+    else
+      echo "event_sync: stopped"
+    fi
+    ;;
   run)
     trap cleanup EXIT INT TERM HUP
     start_tunnel
     start_remote
+    start_event_sync
     status
     echo "Full stack is running. Press Ctrl+C to stop and clean everything."
     while true; do sleep 30; done
     ;;
   *)
-    echo "usage: $0 [run|start|stop|restart|status]" >&2
+    echo "usage: $0 [run|start|stop|restart|status|sync-start|sync-stop|sync-status]" >&2
     exit 2
     ;;
 esac

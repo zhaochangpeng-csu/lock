@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>智能门锁 + 语音 Agent · 初稿演示</title>
+
+  <!-- TailwindCSS CDN -->
+  <script src="https://lf26-cdn-tos.bytecdntp.com/cdn/expire-1-M/tailwindcss/3.0.23/tailwind.min.js"></script>
+
+  <!-- 字体 -->
+  <link href="https://fonts.loli.net/css2?family=Inter:wght@300;400;700;900&display=swap" rel="stylesheet">
+  <link href="https://fonts.loli.net/css2?family=Noto+Sans+SC:wght@300;400;700;900&display=swap" rel="stylesheet">
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; }
+    body {
+      font-family: 'Noto Sans SC', 'Inter', sans-serif;
+      background: #000;
+      color: #fff;
+      overflow: hidden;
+    }
+
+    .stage {
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0a0a0a;
+    }
+
+    .slide {
+      width: min(100vw, 450px);
+      height: min(100vh, 800px);
+      aspect-ratio: 9 / 16;
+      position: absolute;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2.25rem 1.75rem;
+      opacity: 0;
+      transform: translateX(100%);
+      transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+      overflow: hidden;
+      background: linear-gradient(180deg, #0a0a0a 0%, #000000 100%);
+    }
+    .slide.active { opacity: 1; transform: translateX(0); }
+    .slide.prev { opacity: 0; transform: translateX(-100%); }
+
+    .light-spot {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(100px);
+      opacity: 0.3;
+      pointer-events: none;
+    }
+    .light-spot-1 { width: 300px; height: 300px; background: #3b82f6; top: -100px; right: -100px; animation: float1 20s ease-in-out infinite; }
+    .light-spot-2 { width: 250px; height: 250px; background: #8b5cf6; bottom: -80px; left: -80px; animation: float2 25s ease-in-out infinite; }
+    .light-spot-3 { width: 200px; height: 200px; background: #06b6d4; top: 50%; left: 50%; transform: translate(-50%, -50%); animation: float3 18s ease-in-out infinite; }
+    @keyframes float1 { 0%,100%{transform:translate(0,0);} 25%{transform:translate(-50px,30px);} 50%{transform:translate(30px,50px);} 75%{transform:translate(50px,-20px);} }
+    @keyframes float2 { 0%,100%{transform:translate(0,0);} 33%{transform:translate(40px,-40px);} 66%{transform:translate(-30px,30px);} }
+    @keyframes float3 { 0%,100%{transform:translate(-50%,-50%) scale(1);} 50%{transform:translate(-50%,-50%) scale(1.2);} }
+
+    .slide-content {
+      position: relative;
+      z-index: 10;
+      text-align: center;
+      width: 100%;
+      max-height: 100%;
+    }
+
+    .h-eyebrow {
+      font-size: 0.75rem;
+      letter-spacing: 0.3em;
+      color: #9ca3af;
+      font-weight: 400;
+      margin-bottom: 1.25rem;
+      text-transform: uppercase;
+    }
+    .h-title {
+      font-size: 2.5rem;
+      font-weight: 900;
+      line-height: 1.18;
+      color: #fff;
+      margin-bottom: 1.25rem;
+    }
+    .h-sub {
+      font-size: 1.05rem;
+      font-weight: 300;
+      color: #9ca3af;
+      line-height: 1.6;
+    }
+
+    .quote-mark {
+      font-size: 4.5rem;
+      color: #6b7280;
+      line-height: 1;
+      margin-bottom: 0.5rem;
+    }
+
+    .list-tight li {
+      display: flex;
+      gap: 0.75rem;
+      align-items: flex-start;
+      text-align: left;
+      font-size: 1rem;
+      line-height: 1.55;
+      color: #d1d5db;
+      font-weight: 300;
+    }
+    .list-tight li::before {
+      content: "";
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: #60a5fa;
+      margin-top: 0.55rem;
+      flex-shrink: 0;
+    }
+    .list-tight li b { color: #fff; font-weight: 700; }
+
+    .data-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.25rem 1rem;
+      width: 100%;
+    }
+    .data-cell {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 0.75rem 0.25rem;
+      border-top: 1px solid rgba(255,255,255,0.08);
+    }
+    .data-num {
+      font-size: 2.4rem;
+      font-weight: 900;
+      color: #fff;
+      line-height: 1;
+      letter-spacing: -0.02em;
+    }
+    .data-num small { font-size: 1rem; font-weight: 400; color: #9ca3af; margin-left: 2px; }
+    .data-label { font-size: 0.78rem; color: #9ca3af; margin-top: 0.5rem; font-weight: 300; }
+
+    .step-num {
+      font-size: 4.5rem;
+      font-weight: 900;
+      color: #60a5fa;
+      line-height: 1;
+      letter-spacing: -0.05em;
+    }
+    .step-body { font-size: 1.05rem; color: #d1d5db; font-weight: 300; line-height: 1.6; }
+
+    .port-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.85rem 0.5rem;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      text-align: left;
+    }
+    .port-row:last-child { border-bottom: none; }
+    .port-num { font-size: 1.4rem; font-weight: 900; color: #fff; letter-spacing: -0.02em; }
+    .port-desc { font-size: 0.85rem; color: #9ca3af; font-weight: 300; text-align: right; }
+
+    .result-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.75rem 0;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      text-align: left;
+    }
+    .result-row:last-child { border-bottom: none; }
+    .result-label { font-size: 0.95rem; color: #d1d5db; font-weight: 300; flex: 1; padding-right: 1rem; }
+    .result-tag {
+      font-size: 0.7rem; font-weight: 700; letter-spacing: 0.1em;
+      padding: 0.25rem 0.6rem; border-radius: 999px;
+    }
+    .tag-pass { color: #34d399; border: 1px solid rgba(52,211,153,0.4); }
+    .tag-warn { color: #fbbf24; border: 1px solid rgba(251,191,36,0.4); }
+
+    .figure-frame {
+      width: 100%;
+      background: #ffffff;
+      border-radius: 0.5rem;
+      padding: 6px;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+    }
+    .figure-frame img { width: 100%; height: auto; display: block; border-radius: 4px; }
+    .figure-cap {
+      font-size: 0.78rem; color: #6b7280; font-weight: 300; margin-top: 0.75rem; line-height: 1.5;
+    }
+
+    .progress-bar {
+      position: fixed;
+      bottom: 16px; left: 50%;
+      transform: translateX(-50%);
+      display: flex; gap: 6px; z-index: 100;
+    }
+    .progress-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: rgba(255,255,255,0.25);
+      cursor: pointer; transition: all 0.3s;
+    }
+    .progress-dot.active { background: #fff; transform: scale(1.4); }
+    .progress-dot:hover { background: rgba(255,255,255,0.5); }
+
+    .page-number {
+      position: fixed;
+      bottom: 42px; left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.72rem;
+      color: rgba(255,255,255,0.4);
+      letter-spacing: 0.1em;
+      z-index: 100;
+    }
+
+    .stack-narrow { max-width: 320px; margin: 0 auto; }
+  </style>
+</head>
+<body>
+  <div class="stage">
+
+    <!-- 01 封面 -->
+    <div class="slide active">
+      <div class="light-spot light-spot-1"></div>
+      <div class="light-spot light-spot-2"></div>
+      <div class="slide-content">
+        <div class="h-eyebrow">SMART LOCK × VOICE AGENT</div>
+        <h1 class="h-title">基于 Jetson 的<br>多模态智能门锁</h1>
+        <p class="h-sub">硬件认证 · 一次性凭证 · 语音 Agent · 事件闭环</p>
+        <div style="margin-top:2.5rem; font-size:0.75rem; color:#6b7280; letter-spacing:0.15em;">
+          MVP 初稿演示 · 2026.08
+        </div>
+      </div>
+    </div>
+
+    <!-- 02 标题冲击 -->
+    <div class="slide">
+      <div class="light-spot light-spot-2"></div>
+      <div class="light-spot light-spot-3"></div>
+      <div class="slide-content">
+        <div class="quote-mark">"</div>
+        <h1 class="h-title" style="font-size:2.2rem;">硬件守住安全<br>Agent 守住体验</h1>
+        <p class="h-sub" style="margin-top:1.5rem;">让模型理解意图<br>让 Jetson 决定开锁</p>
+      </div>
+    </div>
+
+    <!-- 03 痛点 -->
+    <div class="slide">
+      <div class="light-spot light-spot-1"></div>
+      <div class="light-spot light-spot-3"></div>
+      <div class="slide-content">
+        <div class="h-eyebrow">问题</div>
+        <h2 class="h-title" style="font-size:2rem;">三个还没被解决</h2>
+        <ul class="list-tight space-y-4 mt-2 stack-narrow">
+          <li><span><b>单一识别易被冒用</b><br>照片、替身和环境噪声都能绕过</span></li>
+          <li><span><b>缺自然交互与异常记录</b><br>误操作与陌生人无统一入口</span></li>
+          <li><span><b>大模型不适合直接控锁</b><br>输出不确定，不能承担安全判定</span></li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- 04 数据概览 -->
+    <div class="slide">
+      <div class="light-spot light-spot-1"></div>
+      <div class="light-spot light-spot-2"></div>
+      <div class="slide-content">
+        <div class="h-eyebrow">当前成果</div>
+        <h2 class="h-title" style="font-size:2rem;">数字本身，就是答案</h2>
+        <div class="data-grid mt-2">
+          <div class="data-cell">
+            <div class="data-num">4<small>种</small></div>
+            <div class="data-label">本地检测</div>
+          </div>
+          <div class="data-cell">
+            <div class="data-num">300<small>s</small></div>
+            <div class="data-label">凭证有效期</div>
+          </div>
+          <div class="data-cell">
+            <div class="data-num">2<small>个</small></div>
+            <div class="data-label">Agent 工具</div>
+          </div>
+          <div class="data-cell">
+            <div class="data-num">4<small>个</small></div>
+            <div class="data-label">受监督服务</div>
+          </div>
+        </div>
+        <p class="h-sub" style="margin-top:1.75rem; font-size:0.85rem;">红外 · 人脸 · 活体 · 声纹 — 在边缘端完成</p>
+      </div>
+    </div>
+
+    <!-- 05 部署架构 -->
+    <div class="slide">
+      <div class="slide-content">
+        <div class="h-eyebrow">架构</div>
+        <h2 class="h-title" style="font-size:1.7rem;">Jetson 守边，<br>Windows/WSL 做编排</h2>
+        <div class="figure-frame" style="margin-top:0.5rem;">
+          <img src="architecture.png" alt="总体部署架构图">
+        </div>
+        <p class="figure-cap">DeepSeek 只看到对话与受控工具结果，看不到原始特征</p>
+      </div>
+    </div>
+
+    <!-- 06 多模态认证 -->
+    <div class="slide">
+      <div class="light-spot light-spot-2"></div>
+      <div class="light-spot light-spot-3"></div>
+      <div class="slide-content">
+        <div class="h-eyebrow">认证</div>
+        <h2 class="h-title" style="font-size:1.8rem;">一把钥匙的诞生</h2>
+        <div class="space-y-4 mt-1 stack-narrow">
+          <div class="flex items-center gap-3 text-left">
+            <div class="step-num" style="font-size:2rem; color:#60a5fa;">01</div>
+            <div class="step-body"><b style="color:#fff;">红外触发</b><br>人体靠近，唤醒摄像头</div>
+          </div>
+          <div class="flex items-center gap-3 text-left">
+            <div class="step-num" style="font-size:2rem; color:#60a5fa;">02</div>
+            <div class="step-body"><b style="color:#fff;">人脸 + 活体</b><br>InsightFace 身份 + MediaPipe 眨眼转头</div>
+          </div>
+          <div class="flex items-center gap-3 text-left">
+            <div class="step-num" style="font-size:2rem; color:#60a5fa;">03</div>
+            <div class="step-body"><b style="color:#fff;">声纹 + 身份一致</b><br>ECAPA 文本无关，与人脸同 ID</div>
+          </div>
+          <div class="flex items-center gap-3 text-left">
+            <div class="step-num" style="font-size:2rem; color:#60a5fa;">04</div>
+            <div class="step-body"><b style="color:#fff;">本地加权融合</b><br>阈值 0.78，权重 0.45/0.25/0.20/0.10</div>
+          </div>
+        </div>
+        <p class="h-sub" style="margin-top:1.25rem; font-size:0.78rem;">Agent 不参与这些分数，也无权修改结果</p>
+      </div>
+    </div>
+
+    <!-- 07 两阶段开门 -->
+    <div class="slide">
+      <div class="slide-content">
+        <div class="h-eyebrow">开门</div>
+        <h2 class="h-title" style="font-size:1.8rem;">硬件凭证 + 语音确认</h2>
+        <div class="figure-frame" style="margin-top:0.5rem;">
+          <img src="unlock_sequence.png" alt="两阶段受控开门流程图">
+        </div>
+        <p class="figure-cap">融合通过 → 签发 300s 一次性凭证 → 用户说"开门" → Agent 读取 → 网关验证</p>
+      </div>
+    </div>
+
+    <!-- 08 语音 Agent 流水线 -->
+    <div class="slide">
+      <div class="light-spot light-spot-1"></div>
+      <div class="light-spot light-spot-3"></div>
+      <div class="slide-content">
+        <div class="h-eyebrow">语音</div>
+        <h2 class="h-title" style="font-size:1.8rem;">一段语音的旅程</h2>
+        <div class="space-y-3 mt-1 stack-narrow">
+          <div class="text-left" style="font-size:0.95rem; color:#d1d5db; font-weight:300; line-height:1.6;">
+            <b style="color:#fff;">麦克风</b> · sounddevice / PortAudio · 16kHz 单声道
+          </div>
+          <div class="text-left" style="font-size:0.95rem; color:#d1d5db; font-weight:300; line-height:1.6;">
+            <b style="color:#fff;">Pipecat</b> · Silero VAD · 轮流说话 · 打断处理
+          </div>
+          <div class="text-left" style="font-size:0.95rem; color:#d1d5db; font-weight:300; line-height:1.6;">
+            <b style="color:#fff;">本地 ASR</b> · SenseVoice / FunASR
+          </div>
+          <div class="text-left" style="font-size:0.95rem; color:#d1d5db; font-weight:300; line-height:1.6;">
+            <b style="color:#fff;">Agent</b> · FastGPT 工作流 + DeepSeek
+          </div>
+          <div class="text-left" style="font-size:0.95rem; color:#d1d5db; font-weight:300; line-height:1.6;">
+            <b style="color:#fff;">本地 TTS</b> · sherpa-onnx 优先 → ALSA aplay
+          </div>
+        </div>
+        <p class="h-sub" style="margin-top:1.5rem; font-size:0.78rem;">Pipecat 只做流水线，不做安全判定</p>
+      </div>
+    </div>
+
+    <!-- 09 异常事件闭环 -->
+    <div class="slide">
+      <div class="light-spot light-spot-2"></div>
+      <div class="light-spot light-spot-3"></div>
+      <div class="slide-content">
+        <div class="h-eyebrow">闭环</div>
+        <h2 class="h-title" style="font-size:2rem;">异常，3 秒就记下</h2>
+        <div class="data-grid mt-2">
+          <div class="data-cell">
+            <div class="data-num">3<small>s</small></div>
+            <div class="data-label">陌生人未识别</div>
+          </div>
+          <div class="data-cell">
+            <div class="data-num">5<small>s</small></div>
+            <div class="data-label">离开后重置</div>
+          </div>
+        </div>
+        <div class="text-left mt-6 stack-narrow" style="font-size:0.92rem; color:#d1d5db; font-weight:300; line-height:1.7;">
+          <div>认证失败 → 写入 <span style="color:#fff;">latest_event.json</span></div>
+          <div>SCP 同步 → WorkBuddy 定时读取 → Bot 通知</div>
+          <div>成功后标记 <span style="color:#fff;">processed=true</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 10 四层安全 -->
+    <div class="slide">
+      <div class="light-spot light-spot-1"></div>
+      <div class="light-spot light-spot-2"></div>
+      <div class="slide-content">
+        <div class="h-eyebrow">安全</div>
+        <h2 class="h-title" style="font-size:1.9rem;">四层约束</h2>
+        <ul class="list-tight space-y-4 mt-2 stack-narrow">
+          <li><span><b>融合层</b><br>只有 Jetson 本地 FusionEngine 产出结果</span></li>
+          <li><span><b>凭证层</b><br>短时、一次性、过期与重复消费均拒绝</span></li>
+          <li><span><b>Agent 层</b><br>只注册 current_auth_context 与 request_unlock</span></li>
+          <li><span><b>执行层</b><br>Bearer Token + SMART_LOCK_NO_UNLOCK 双重闸门</span></li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- 11 端口与治理 -->
+    <div class="slide">
+      <div class="light-spot light-spot-2"></div>
+      <div class="light-spot light-spot-3"></div>
+      <div class="slide-content">
+        <div class="h-eyebrow">部署</div>
+        <h2 class="h-title" style="font-size:1.9rem;">三个端口，一条监督线</h2>
+        <div class="stack-narrow mt-2" style="width:100%; max-width:340px;">
+          <div class="port-row">
+            <div class="port-num">3300</div>
+            <div class="port-desc">FastGPT · Windows/WSL</div>
+          </div>
+          <div class="port-row">
+            <div class="port-num">8787</div>
+            <div class="port-desc">门锁工具网关 · Jetson</div>
+          </div>
+          <div class="port-row">
+            <div class="port-num">8790</div>
+            <div class="port-desc">异常事件服务 · Jetson 本机</div>
+          </div>
+        </div>
+        <p class="h-sub" style="margin-top:1.5rem; font-size:0.82rem;">run_smart_lock.sh: start / status / restart / stop<br>子进程异常退出自动拉起</p>
+      </div>
+    </div>
+
+    <!-- 12 测试结果 -->
+    <div class="slide">
+      <div class="light-spot light-spot-1"></div>
+      <div class="light-spot light-spot-3"></div>
+      <div class="slide-content">
+        <div class="h-eyebrow">验证</div>
+        <h2 class="h-title" style="font-size:1.9rem;">已经跑过的链路</h2>
+        <div class="stack-narrow mt-1" style="width:100%; max-width:340px;">
+          <div class="result-row">
+            <div class="result-label">原硬件五步认证</div>
+            <div class="result-tag tag-pass">已验证</div>
+          </div>
+          <div class="result-row">
+            <div class="result-label">Agent 有效/无效凭证调用</div>
+            <div class="result-tag tag-pass">已验证</div>
+          </div>
+          <div class="result-row">
+            <div class="result-label">工具网关 & 事件服务生命周期</div>
+            <div class="result-tag tag-pass">已验证</div>
+          </div>
+          <div class="result-row">
+            <div class="result-label">Pipecat 单元 + 文件语音链路</div>
+            <div class="result-tag tag-pass">已验证</div>
+          </div>
+          <div class="result-row">
+            <div class="result-label">异常事件 + aplay 最新改动</div>
+            <div class="result-tag tag-warn">待板端复测</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 13 边界与风险 -->
+    <div class="slide">
+      <div class="light-spot light-spot-2"></div>
+      <div class="light-spot light-spot-3"></div>
+      <div class="slide-content">
+        <div class="h-eyebrow">边界</div>
+        <h2 class="h-title" style="font-size:1.9rem;">我们知道的边界</h2>
+        <ul class="list-tight space-y-3 mt-1 stack-narrow" style="font-size:0.88rem;">
+          <li><span>开发板 SSH 中断，最新代码待同步</span></li>
+          <li><span>执行器为串口风扇模拟，真实继电器需看护</span></li>
+          <li><span>DeepSeek 仍需网络，断网时 agent_confirm 受影响</span></li>
+          <li><span>回声消除、长时间打断、端到端延迟缺正式数据</span></li>
+          <li><span>latest_event.json 只存最新一条，待升级队列</span></li>
+          <li><span>WorkBuddy 提示词与同步已就绪，Bot 渠道未接入</span></li>
+          <li><span>Nano 4GB 资源余量未知，需压测与模型量化</span></li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- 14 结尾 -->
+    <div class="slide">
+      <div class="light-spot light-spot-1"></div>
+      <div class="light-spot light-spot-2"></div>
+      <div class="light-spot light-spot-3"></div>
+      <div class="slide-content">
+        <div class="h-eyebrow">结论</div>
+        <h1 class="h-title" style="font-size:1.7rem;">硬件认证 · Agent 交互<br>网关执行</h1>
+        <p class="h-sub" style="margin-top:1.5rem;">三者各司其职，组合可行<br>下一站：板端验收 → 真实异常演示</p>
+        <div style="margin-top:2.5rem; font-size:0.75rem; color:#6b7280; letter-spacing:0.2em;">
+          — 谢谢 —
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- 进度条 -->
+  <div class="progress-bar" id="progressBar"></div>
+  <div class="page-number" id="pageNumber">01 / 14</div>
+
+  <script>
+    const slides = document.querySelectorAll('.slide');
+    const progressBar = document.getElementById('progressBar');
+    const pageNumber = document.getElementById('pageNumber');
+    let currentSlide = 0;
+
+    slides.forEach((_, i) => {
+      const dot = document.createElement('div');
+      dot.className = 'progress-dot' + (i === 0 ? ' active' : '');
+      dot.addEventListener('click', () => goToSlide(i));
+      progressBar.appendChild(dot);
+    });
+
+    function updateSlides() {
+      slides.forEach((s, i) => {
+        s.classList.remove('active', 'prev');
+        if (i === currentSlide) s.classList.add('active');
+        else if (i < currentSlide) s.classList.add('prev');
+      });
+      document.querySelectorAll('.progress-dot').forEach((d, i) => d.classList.toggle('active', i === currentSlide));
+      pageNumber.textContent = String(currentSlide + 1).padStart(2, '0') + ' / ' + String(slides.length).padStart(2, '0');
+    }
+
+    function nextSlide() { if (currentSlide < slides.length - 1) { currentSlide++; updateSlides(); } }
+    function prevSlide() { if (currentSlide > 0) { currentSlide--; updateSlides(); } }
+    function goToSlide(i) { currentSlide = i; updateSlides(); }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') { e.preventDefault(); nextSlide(); }
+      else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); prevSlide(); }
+      else if (e.key === 'Home') { goToSlide(0); }
+      else if (e.key === 'End') { goToSlide(slides.length - 1); }
+    });
+
+    let touchStartX = 0;
+    document.addEventListener('touchstart', (e) => { touchStartX = e.touches[0].clientX; });
+    document.addEventListener('touchend', (e) => {
+      const diff = touchStartX - e.changedTouches[0].clientX;
+      if (Math.abs(diff) > 50) { diff > 0 ? nextSlide() : prevSlide(); }
+    });
+  </script>
+</body>
+</html>

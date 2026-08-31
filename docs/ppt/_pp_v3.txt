@@ -1,0 +1,4 @@
+OPENED_OK
+slides=21
+shapes=285
+size=960x540

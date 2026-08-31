@@ -29,7 +29,7 @@ dot -Tpng -Gdpi=180 docs/unlock_sequence.dot -o docs/unlock_sequence.png
 
 - 原硬件正向认证、基础Pipecat语音对话和开发板硬件链路已经验证。
 - FastGPT真实工具调用、网关/事件服务生命周期和本机端口清理已经验证。
-- 最新异常自动触发和Jetson `aplay`输出改动已实现，但因开发板SSH当前拒绝密钥交换，尚未同步到板端复测。
+- 最新异常自动触发已在开发板GUI中通过mock红外、真实摄像头和真实人脸模型验证；Jetson `aplay`输出改动已上传但待单独语音复测。
 - WorkBuddy同步脚本和提示词已经完成；正式定时任务、Bot渠道和真实继电器属于后续工作。
 - 实测板为Orin NX级别、约7.4 GiB内存；Nano 4GB只是目标兼容平台，不能宣称已经完成部署。
 

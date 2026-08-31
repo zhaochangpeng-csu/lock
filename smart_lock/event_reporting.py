@@ -21,7 +21,7 @@ def build_auth_failure_event(
     identity = "unknown"
     for result in results:
         candidate = result.metadata.get("identity")
-        if candidate:
+        if result.passed and candidate:
             identity = str(candidate)
             break
 

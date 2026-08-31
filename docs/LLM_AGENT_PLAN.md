@@ -283,10 +283,11 @@ event_reporting:
   - sherpa-onnx 小 ASR + 本地 VITS TTS 基准测试。
   - 整机内存/延迟/回声测试。
   - 真机安全回归：`immediate` + `agent_confirm` 两条路径。
-- **Phase E：异常事件（本机实现完成，板端待复测）**
+- **Phase E：异常事件（开发板自动触发已验证）**
   - 认证失败自动上报、单事件文件、processed 标记均已实现。
   - 事件服务 start/restart/stop/crash/recovery 和端口清理已通过。
-  - 待 SSH 恢复后同步开发板，并接入 WorkBuddy/Bot 定时通知。
+  - 开发板GUI已通过mock红外、真实摄像头和真实人脸模型自动生成事件，低置信度候选不会被误写为已认证身份。
+  - 待接入 WorkBuddy/Bot 定时通知，并在现场使用真实红外完成演示。
 
 ## 13. 验收清单
 

@@ -54,6 +54,14 @@ Still to validate on the physical Jetson:
 - Real GPIO relay action (requires supervised hardware test; keep `SMART_LOCK_NO_UNLOCK=1`).
 - Long-running barge-in / echo / latency stability.
 - Direct PC firewall rule for `http://192.168.1.111:3300` (E2E used an SSH reverse tunnel while the direct path was blocked).
+- Pipecat playback through the newly unified ALSA `aplay` output transport.
+
+Validated abnormal-event flow on the physical Jetson (2026-08-31):
+
+- Uploaded the latest GUI event trigger, event reporter, configuration, and supervised startup files; local and board hashes match.
+- GUI model preload, real camera, real InsightFace inference, mock infrared rising edge, three-second unknown-face delay, HTTP event report, and atomic `latest_event.json` write passed as one chain.
+- A failed low-confidence face candidate is recorded with `identity=unknown`; the nearest candidate name is not treated as an authenticated identity.
+- Event `processed=true` transition passed. Test processes stopped, serial-infrared configuration restored, and ports 8787/8790 were clean afterward.
 
 `lock.flow` selects the unlock workflow. `immediate` preserves the original hardware behavior. `agent_confirm` records a short-lived hardware fusion credential and waits for the user to ask the voice Agent to open the door. The Agent cannot rescore or override that credential.
 

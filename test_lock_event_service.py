@@ -40,7 +40,13 @@ def main() -> None:
 
         results = [
             AuthResult("sensor", True, 1.0, "presence detected"),
-            AuthResult("face", False, 0.2, "face not recognized"),
+            AuthResult(
+                "face",
+                False,
+                0.2,
+                "face not recognized",
+                {"identity": "low-confidence-candidate"},
+            ),
             AuthResult("liveness", False, 0.1, "blink not detected"),
         ]
         payload = build_auth_failure_event(0.31, results)
